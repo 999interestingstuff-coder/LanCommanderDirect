@@ -1,0 +1,72 @@
+using System;
+using System.Collections.Generic;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+
+namespace LanCommanderDirect
+{
+    /// <summary>User-editable settings, stored as config.json in the plugin's data folder.</summary>
+    public class LcConfig
+    {
+        public string ServerUrl { get; set; } = "http://192.168.1.104:1337";
+        public string Username { get; set; } = "";
+        public string Password { get; set; } = "";
+
+        /// <summary>Folder games get installed into. Empty = %USERPROFILE%\Games\LANCommander</summary>
+        public string InstallRoot { get; set; } = "";
+
+        /// <summary>Only needed for non-zip archives. Full path to 7z.exe. Empty = auto-detect.</summary>
+        public string SevenZipPath { get; set; } = "";
+
+        /// <summary>Report play sessions (start/stop) to the server.</summary>
+        public bool TrackPlayTime { get; set; } = true;
+    }
+
+    public class LcNamed
+    {
+        [JsonProperty("name")] public string Name { get; set; }
+    }
+
+    /// <summary>Media types seen on the server: 0 = icon, 1 = cover, 2 = background.</summary>
+    public class LcMedia
+    {
+        [JsonProperty("id")] public Guid Id { get; set; }
+        [JsonProperty("fileId")] public Guid FileId { get; set; }
+        [JsonProperty("type")] public int Type { get; set; }
+        [JsonProperty("mimeType")] public string MimeType { get; set; }
+    }
+
+    public class LcArchive
+    {
+        [JsonProperty("id")] public Guid Id { get; set; }
+        [JsonProperty("version")] public string Version { get; set; }
+        [JsonProperty("compressedSize")] public long CompressedSize { get; set; }
+        [JsonProperty("uncompressedSize")] public long UncompressedSize { get; set; }
+        [JsonProperty("createdOn")] public DateTime? CreatedOn { get; set; }
+    }
+
+    /// <summary>
+    /// A game as returned by /api/Games (light record) or /api/Games/{id} (full record,
+    /// including archives, media, developers...).
+    /// </summary>
+    public class LcGame
+    {
+        [JsonProperty("id")] public Guid Id { get; set; }
+        [JsonProperty("title")] public string Title { get; set; }
+        [JsonProperty("description")] public string Description { get; set; }
+        [JsonProperty("version")] public string Version { get; set; }
+        [JsonProperty("releasedOn")] public DateTime? ReleasedOn { get; set; }
+        [JsonProperty("singleplayer")] public bool Singleplayer { get; set; }
+
+        [JsonProperty("archives")] public List<LcArchive> Archives { get; set; }
+        [JsonProperty("media")] public List<LcMedia> Media { get; set; }
+        [JsonProperty("developers")] public List<LcNamed> Developers { get; set; }
+        [JsonProperty("publishers")] public List<LcNamed> Publishers { get; set; }
+        [JsonProperty("genres")] public List<LcNamed> Genres { get; set; }
+        [JsonProperty("tags")] public List<LcNamed> Tags { get; set; }
+
+        /// <summary>Launch actions defined on the server. Shape not documented, so kept as raw JSON.</summary>
+        [JsonProperty("actions")] public List<JObject> Actions { get; set; }
+
+    }
+}
