@@ -8,7 +8,6 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
-using System.Windows.Shapes;
 using System.Windows.Threading;
 using Playnite.SDK;
 using Playnite.SDK.Models;
@@ -96,9 +95,9 @@ namespace LanCommanderDirect
         }
 
         /// <summary>The small header glyph: a download arrow, or a cross for a failure. Drawn as a path so no icon font is needed.</summary>
-        static Path HeaderGlyph(bool error)
+        static System.Windows.Shapes.Path HeaderGlyph(bool error)
         {
-            return new Path
+            return new System.Windows.Shapes.Path
             {
                 Data = Geometry.Parse(error ? "M3,3 L11,11 M11,3 L3,11" : "M7,1 L7,9 M3,6 L7,10 L11,6 M1,13 L13,13"),
                 Stroke = new SolidColorBrush(error ? ErrorColor : GreyText),
