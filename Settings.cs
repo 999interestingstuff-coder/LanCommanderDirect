@@ -162,7 +162,7 @@ namespace LanCommanderDirect
             timeBox.SetBinding(CheckBox.IsCheckedProperty, new Binding("TrackPlayTime") { Mode = BindingMode.TwoWay });
             panel.Children.Add(timeBox);
 
-            panel.Children.Add(Check("PopupNotifications", "Show a Windows popup when a game has been installed or updated"));
+            panel.Children.Add(Check("PopupNotifications", "Show a popup inside Playnite when a game has been installed or updated"));
             panel.Children.Add(Check("AutoUpdate", "Update games automatically when a newer archive is uploaded to the server (off = update from the game's right-click menu)"));
             panel.Children.Add(Check("SyncMetadata", "Server is the source of truth: overwrite description, developers, genres, images... from LANCommander on every library update"));
             panel.Children.Add(Check("SyncVideos", "Download trailer / micro trailer videos from the server into Extra Metadata (a video named \"micro\" is the micro trailer)"));

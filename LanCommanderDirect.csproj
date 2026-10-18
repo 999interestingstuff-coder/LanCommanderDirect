@@ -22,9 +22,6 @@
     <Reference Include="PresentationCore" />
     <Reference Include="WindowsBase" />
     <Reference Include="System.Xaml" />
-    <!-- tray popup when a game is installed or updated -->
-    <Reference Include="System.Windows.Forms" />
-    <Reference Include="System.Drawing" />
   </ItemGroup>
 
   <ItemGroup>

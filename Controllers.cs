@@ -605,7 +605,7 @@ namespace LanCommanderDirect
                     InvokeOnInstalled(new GameInstalledEventArgs(new GameInstallationData { InstallDirectory = installDir }));
                     api.Notifications.Remove(noteId);
                     api.Notifications.Add(new NotificationMessage(noteId, gameName + " is installed.", NotificationType.Info));
-                    if (cfg.PopupNotifications) LcToast.Show("LANCommander", gameName + " is installed.");
+                    if (cfg.PopupNotifications) LcToast.Show(api, "LANCommander", gameName + " is installed.");
                 });
             });
         }
