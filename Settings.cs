@@ -27,6 +27,7 @@ namespace LanCommanderDirect
         bool syncMetadata = true;
         bool syncVideos = true;
         bool popupNotifications = true;
+        bool popupOverGames = true;
 
         public string ServerUrl { get { return serverUrl; } set { SetValue(ref serverUrl, value); } }
         public string Username { get { return username; } set { SetValue(ref username, value); } }
@@ -38,6 +39,7 @@ namespace LanCommanderDirect
         public bool SyncMetadata { get { return syncMetadata; } set { SetValue(ref syncMetadata, value); } }
         public bool SyncVideos { get { return syncVideos; } set { SetValue(ref syncVideos, value); } }
         public bool PopupNotifications { get { return popupNotifications; } set { SetValue(ref popupNotifications, value); } }
+        public bool PopupOverGames { get { return popupOverGames; } set { SetValue(ref popupOverGames, value); } }
 
         public LcSettings(LanCommanderLibrary plugin)
         {
@@ -57,6 +59,7 @@ namespace LanCommanderDirect
             SyncMetadata = c.SyncMetadata;
             SyncVideos = c.SyncVideos;
             PopupNotifications = c.PopupNotifications;
+            PopupOverGames = c.PopupOverGames;
         }
 
         public LcConfig ToConfig()
@@ -72,7 +75,8 @@ namespace LanCommanderDirect
                 AutoUpdate = AutoUpdate,
                 SyncMetadata = SyncMetadata,
                 SyncVideos = SyncVideos,
-                PopupNotifications = PopupNotifications
+                PopupNotifications = PopupNotifications,
+                PopupOverGames = PopupOverGames
             };
         }
 
@@ -162,7 +166,8 @@ namespace LanCommanderDirect
             timeBox.SetBinding(CheckBox.IsCheckedProperty, new Binding("TrackPlayTime") { Mode = BindingMode.TwoWay });
             panel.Children.Add(timeBox);
 
-            panel.Children.Add(Check("PopupNotifications", "Show a popup inside Playnite when a game has been installed or updated"));
+            panel.Children.Add(Check("PopupNotifications", "Show a popup when a game has been installed or updated"));
+            panel.Children.Add(Check("PopupOverGames", "Show that popup over everything, including running borderless/windowed games (off = only inside Playnite's window)"));
             panel.Children.Add(Check("AutoUpdate", "Update games automatically when a newer archive is uploaded to the server (off = update from the game's right-click menu)"));
             panel.Children.Add(Check("SyncMetadata", "Server is the source of truth: overwrite description, developers, genres, images... from LANCommander on every library update"));
             panel.Children.Add(Check("SyncVideos", "Download trailer / micro trailer videos from the server into Extra Metadata (a video named \"micro\" is the micro trailer)"));

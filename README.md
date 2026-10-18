@@ -92,10 +92,16 @@ Playnite already has:
 Videos are added in LANCommander as media of type **Video**. A video whose **Name** contains `micro` is the micro trailer; any
 other video is the trailer. Videos are recognised by their MIME type, and should be mp4.
 
-## Popups (0.3.2)
+## Popups (0.3.3)
 
-When a game has been installed or updated, a small popup appears inside Playnite (bottom-right of its window, in Desktop and
-Fullscreen mode) in addition to the entry in the notification panel. A failed update shows one too, which matters for
-auto-update. The popup never takes focus and ignores mouse and controller input, and fades out after a few seconds. If
-Playnite's window is hidden or minimized, only the notification panel entry is added. Turn it off with **Show a popup inside
-Playnite...** in the settings. No Windows notifications are used.
+When a game has been installed or updated, a small popup appears (bottom-right, fades out after a few seconds) in addition to
+the entry in Playnite's notification panel. A failed update shows one too, which matters for auto-update. The popup never
+takes focus, ignores mouse and controller input and is not listed in Alt+Tab.
+
+- **Over games** (default): an always-on-top popup in the bottom-right of the primary screen, so you are told while a game is
+  running. It shows over windowed and borderless games; Windows does not let a normal window draw over a game in exclusive
+  fullscreen. It also shows if Playnite is minimized.
+- **Inside Playnite only**: turn off *Show that popup over everything...* and it is drawn over Playnite's own window (Desktop
+  and Fullscreen mode) instead. Nothing is shown while Playnite is hidden or minimized.
+
+Turn popups off completely with *Show a popup when a game has been installed or updated*. No Windows notifications are used.

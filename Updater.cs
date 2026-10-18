@@ -88,7 +88,7 @@ namespace LanCommanderDirect
                         {
                             logger.Error(error, "LANCommander update failed for " + name);
                             api.Notifications.Add(new NotificationMessage(noteId, name + ": update failed: " + error.Message, NotificationType.Error));
-                            if (cfg.PopupNotifications) LcToast.Show(api, "LANCommander", name + ": update failed: " + error.Message, true);
+                            if (cfg.PopupNotifications) LcToast.Show(api, "LANCommander", name + ": update failed: " + error.Message, true, cfg.PopupOverGames);
                             return;
                         }
 
@@ -98,7 +98,7 @@ namespace LanCommanderDirect
                             api.Database.Games.Update(game);
                         }
                         api.Notifications.Add(new NotificationMessage(noteId, name + " is updated.", NotificationType.Info));
-                        if (cfg.PopupNotifications) LcToast.Show(api, "LANCommander", name + " is updated.");
+                        if (cfg.PopupNotifications) LcToast.Show(api, "LANCommander", name + " is updated.", false, cfg.PopupOverGames);
                     });
                 }
                 catch (Exception e)
