@@ -92,12 +92,13 @@ Playnite already has:
 Videos are added in LANCommander as media of type **Video**. A video whose **Name** contains `micro` is the micro trailer; any
 other video is the trailer. Videos are recognised by their MIME type, and should be mp4.
 
-## Popups (0.3.4)
+## Popups (0.3.5)
 
-When a game has been installed or updated, a small popup appears (bottom-right, fades out after a few seconds) in addition to
-the entry in Playnite's notification panel. It shows the game's icon next to the accent bar, the game's name in large type, and a
-small line under it ("Installed" or "Updated", then LANCommander, or the error text if an update failed). A failed update shows one too, which matters for auto-update. The popup never
-takes focus, ignores mouse and controller input and is not listed in Alt+Tab.
+When a game has been installed or updated, a popup styled after Steam's "Download Complete" toast slides in at the bottom-right
+(in addition to the entry in Playnite's notification panel): a dark panel, the game's icon on the left, a small grey header
+("Download Complete" for an install, "Update Complete" for an update, "Update Failed" with the error underneath if an update
+failed), the game's name in white on one line, and a grey line below it. It fades out after a few seconds. It never takes
+focus, ignores mouse and controller input and is not listed in Alt+Tab.
 
 - **Over games** (default): an always-on-top popup in the bottom-right of the primary screen, so you are told while a game is
   running. It shows over windowed and borderless games; Windows does not let a normal window draw over a game in exclusive
