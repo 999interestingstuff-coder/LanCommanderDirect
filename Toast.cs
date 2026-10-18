@@ -1,13 +1,16 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Playnite.SDK;
+using Playnite.SDK.Models;
 
 namespace LanCommanderDirect
 {
@@ -21,7 +24,9 @@ namespace LanCommanderDirect
     /// Inside Playnite only: drawn over Playnite's own window (Desktop and Fullscreen mode); nothing is shown while
     /// Playnite is hidden or minimized.
     ///
-    /// The entry in Playnite's notification panel is always added separately.
+    /// Layout: the game's icon next to the accent bar, the game's name large, and a small status line under it
+    /// ("Installed" / "Updated" and LANCommander, or the error text). The entry in Playnite's notification panel is
+    /// always added separately.
     /// </summary>
     static class LcToast
     {
@@ -36,11 +41,12 @@ namespace LanCommanderDirect
         [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hWnd, int nIndex);
         [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
-        public static void Show(IPlayniteAPI api, string title, string text, bool error, bool overGames)
+        /// <summary>Shows a popup for a game. status is a short line such as "Installed" or "Updated", or the error text.</summary>
+        public static void Show(IPlayniteAPI api, Game game, string status, bool error, bool overGames)
         {
             try
             {
-                api.MainView.UIDispatcher.BeginInvoke(new Action(() => ShowCore(api, title, text, error, overGames)));
+                api.MainView.UIDispatcher.BeginInvoke(new Action(() => ShowCore(api, game, status, error, overGames)));
             }
             catch (Exception e)
             {
@@ -48,7 +54,33 @@ namespace LanCommanderDirect
             }
         }
 
-        static void ShowCore(IPlayniteAPI api, string title, string text, bool error, bool overGames)
+        /// <summary>The game's icon from Playnite's database, or null if it has none or it can't be read.</summary>
+        static ImageSource LoadIcon(IPlayniteAPI api, Game game)
+        {
+            try
+            {
+                if (game == null || string.IsNullOrEmpty(game.Icon)) return null;
+
+                var path = api.Database.GetFullFilePath(game.Icon);
+                if (string.IsNullOrEmpty(path) || !File.Exists(path)) return null;
+
+                var bmp = new BitmapImage();
+                bmp.BeginInit();
+                bmp.CacheOption = BitmapCacheOption.OnLoad;
+                bmp.CreateOptions = BitmapCreateOptions.IgnoreImageCache;
+                bmp.UriSource = new Uri(path, UriKind.Absolute);
+                bmp.DecodePixelWidth = 128;
+                bmp.EndInit();
+                bmp.Freeze();
+                return bmp;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        static void ShowCore(IPlayniteAPI api, Game game, string status, bool error, bool overGames)
         {
             try
             {
@@ -62,22 +94,42 @@ namespace LanCommanderDirect
 
                 var accent = error ? Color.FromRgb(0xE0, 0x4F, 0x4F) : Color.FromRgb(0x3D, 0x8B, 0xFF);
 
-                var panel = new StackPanel();
-                panel.Children.Add(new TextBlock
+                var texts = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+                texts.Children.Add(new TextBlock
                 {
-                    Text = title,
+                    Text = game != null && !string.IsNullOrWhiteSpace(game.Name) ? game.Name : "LANCommander",
                     FontWeight = FontWeights.Bold,
-                    FontSize = 16,
-                    Foreground = Brushes.White
+                    FontSize = 20,
+                    Foreground = Brushes.White,
+                    TextWrapping = TextWrapping.Wrap
                 });
-                panel.Children.Add(new TextBlock
+                texts.Children.Add(new TextBlock
                 {
-                    Text = text,
-                    FontSize = 14,
-                    Foreground = new SolidColorBrush(Color.FromRgb(0xDD, 0xDD, 0xDD)),
+                    Text = error ? status : status + "  \u00B7  LANCommander",
+                    FontSize = 13,
+                    Foreground = new SolidColorBrush(error ? Color.FromRgb(0xFF, 0xB4, 0xB4) : Color.FromRgb(0xA9, 0xB1, 0xC2)),
                     TextWrapping = TextWrapping.Wrap,
-                    Margin = new Thickness(0, 4, 0, 0)
+                    Margin = new Thickness(0, 2, 0, 0)
                 });
+
+                var panel = new DockPanel();
+                var iconSource = LoadIcon(api, game);
+                if (iconSource != null)
+                {
+                    var image = new Image
+                    {
+                        Source = iconSource,
+                        Width = 52,
+                        Height = 52,
+                        Stretch = Stretch.Uniform,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Margin = new Thickness(0, 0, 14, 0)
+                    };
+                    RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
+                    DockPanel.SetDock(image, Dock.Left);
+                    panel.Children.Add(image);
+                }
+                panel.Children.Add(texts);
 
                 var border = new Border
                 {
