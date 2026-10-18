@@ -91,3 +91,8 @@ Playnite already has:
 
 Videos are added in LANCommander as media of type **Video**. A video whose **Name** contains `micro` is the micro trailer; any
 other video is the trailer. Videos are recognised by their MIME type, and should be mp4.
+
+## Popups (0.3.1)
+
+When a game has been installed or updated, a Windows popup appears in addition to the entry in Playnite's notification
+panel. A failed update shows one too, which matters for auto-update. Turn it off with **Show a Windows popup...** in the settings.

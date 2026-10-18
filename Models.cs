@@ -27,6 +27,9 @@ namespace LanCommanderDirect
         /// <summary>Treat the server as the source of truth: overwrite description, developers, images... on every library update.</summary>
         public bool SyncMetadata { get; set; } = true;
 
+        /// <summary>Show a Windows popup when a game has been installed or updated (or an update failed).</summary>
+        public bool PopupNotifications { get; set; } = true;
+
         /// <summary>Download trailer / micro trailer videos from the server into Extra Metadata.</summary>
         public bool SyncVideos { get; set; } = true;
     }
