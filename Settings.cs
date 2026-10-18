@@ -23,6 +23,9 @@ namespace LanCommanderDirect
         string installRoot = "";
         string sevenZipPath = "";
         bool trackPlayTime = true;
+        bool autoUpdate = false;
+        bool syncMetadata = true;
+        bool syncVideos = true;
 
         public string ServerUrl { get { return serverUrl; } set { SetValue(ref serverUrl, value); } }
         public string Username { get { return username; } set { SetValue(ref username, value); } }
@@ -30,6 +33,9 @@ namespace LanCommanderDirect
         public string InstallRoot { get { return installRoot; } set { SetValue(ref installRoot, value); } }
         public string SevenZipPath { get { return sevenZipPath; } set { SetValue(ref sevenZipPath, value); } }
         public bool TrackPlayTime { get { return trackPlayTime; } set { SetValue(ref trackPlayTime, value); } }
+        public bool AutoUpdate { get { return autoUpdate; } set { SetValue(ref autoUpdate, value); } }
+        public bool SyncMetadata { get { return syncMetadata; } set { SetValue(ref syncMetadata, value); } }
+        public bool SyncVideos { get { return syncVideos; } set { SetValue(ref syncVideos, value); } }
 
         public LcSettings(LanCommanderLibrary plugin)
         {
@@ -45,6 +51,9 @@ namespace LanCommanderDirect
             InstallRoot = c.InstallRoot ?? "";
             SevenZipPath = c.SevenZipPath ?? "";
             TrackPlayTime = c.TrackPlayTime;
+            AutoUpdate = c.AutoUpdate;
+            SyncMetadata = c.SyncMetadata;
+            SyncVideos = c.SyncVideos;
         }
 
         public LcConfig ToConfig()
@@ -56,7 +65,10 @@ namespace LanCommanderDirect
                 Password = Password ?? "",
                 InstallRoot = (InstallRoot ?? "").Trim(),
                 SevenZipPath = (SevenZipPath ?? "").Trim(),
-                TrackPlayTime = TrackPlayTime
+                TrackPlayTime = TrackPlayTime,
+                AutoUpdate = AutoUpdate,
+                SyncMetadata = SyncMetadata,
+                SyncVideos = SyncVideos
             };
         }
 
@@ -146,6 +158,10 @@ namespace LanCommanderDirect
             timeBox.SetBinding(CheckBox.IsCheckedProperty, new Binding("TrackPlayTime") { Mode = BindingMode.TwoWay });
             panel.Children.Add(timeBox);
 
+            panel.Children.Add(Check("AutoUpdate", "Update games automatically when a newer archive is uploaded to the server (off = update from the game's right-click menu)"));
+            panel.Children.Add(Check("SyncMetadata", "Server is the source of truth: overwrite description, developers, genres, images... from LANCommander on every library update"));
+            panel.Children.Add(Check("SyncVideos", "Download trailer / micro trailer videos from the server into Extra Metadata (a video named \"micro\" is the micro trailer)"));
+
             var test = new Button
             {
                 Content = "Test connection",
@@ -172,13 +188,24 @@ namespace LanCommanderDirect
 
             panel.Children.Add(new TextBlock
             {
-                Text = "Saves are handled exclusively by the Ludusavi Playnite extension. This plugin only synchronizes Playnite play sessions with LANCommander. Click Save in the add-ons window to keep your changes. The password is stored as plain text in config.json.",
+                Text = "Saves are handled exclusively by the Ludusavi Playnite extension. The install folder above is also scanned for games that are already installed. Click Save in the add-ons window to keep your changes. The password is stored as plain text in config.json.",
                 TextWrapping = TextWrapping.Wrap,
                 Opacity = 0.7,
                 Margin = new Thickness(0, 16, 0, 0)
             });
 
             Content = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = panel };
+        }
+
+        static CheckBox Check(string bindingPath, string text)
+        {
+            var cb = new CheckBox
+            {
+                Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap },
+                Margin = new Thickness(0, 0, 0, 12)
+            };
+            cb.SetBinding(CheckBox.IsCheckedProperty, new Binding(bindingPath) { Mode = BindingMode.TwoWay });
+            return cb;
         }
 
         static TextBlock Label(string text)

@@ -20,6 +20,15 @@ namespace LanCommanderDirect
 
         /// <summary>Report play sessions (start/stop) to the server.</summary>
         public bool TrackPlayTime { get; set; } = true;
+
+        /// <summary>Download and install new archives automatically when the server has a newer one. Off = update from the game menu.</summary>
+        public bool AutoUpdate { get; set; } = false;
+
+        /// <summary>Treat the server as the source of truth: overwrite description, developers, images... on every library update.</summary>
+        public bool SyncMetadata { get; set; } = true;
+
+        /// <summary>Download trailer / micro trailer videos from the server into Extra Metadata.</summary>
+        public bool SyncVideos { get; set; } = true;
     }
 
     public class LcNamed
@@ -27,13 +36,29 @@ namespace LanCommanderDirect
         [JsonProperty("name")] public string Name { get; set; }
     }
 
-    /// <summary>Media types seen on the server: 0 = icon, 1 = cover, 2 = background.</summary>
+    /// <summary>
+    /// Media types seen on the server: 0 = icon, 1 = cover, 2 = background, 4 = logo. Videos are recognised by
+    /// their MIME type (the server's own "Video" type is also checked), so the exact number does not matter.
+    /// </summary>
     public class LcMedia
     {
+        [JsonProperty("name")] public string Name { get; set; }
+
         [JsonProperty("id")] public Guid Id { get; set; }
         [JsonProperty("fileId")] public Guid FileId { get; set; }
         [JsonProperty("type")] public int Type { get; set; }
         [JsonProperty("mimeType")] public string MimeType { get; set; }
+
+        public bool IsVideo
+        {
+            get { return (MimeType ?? "").StartsWith("video/", StringComparison.OrdinalIgnoreCase); }
+        }
+
+        /// <summary>A video whose name contains "micro" is the micro trailer, any other video is the trailer.</summary>
+        public bool IsMicro
+        {
+            get { return (Name ?? "").IndexOf("micro", StringComparison.OrdinalIgnoreCase) >= 0; }
+        }
     }
 
     public class LcArchive
@@ -68,5 +93,15 @@ namespace LanCommanderDirect
         /// <summary>Launch actions defined on the server. Shape not documented, so kept as raw JSON.</summary>
         [JsonProperty("actions")] public List<JObject> Actions { get; set; }
 
+        /// <summary>The newest uploaded archive, or null if there is none.</summary>
+        public LcArchive LatestArchive()
+        {
+            if (Archives == null) return null;
+            LcArchive best = null;
+            foreach (var a in Archives)
+                if (best == null || (a.CreatedOn ?? DateTime.MinValue) > (best.CreatedOn ?? DateTime.MinValue))
+                    best = a;
+            return best;
+        }
     }
 }

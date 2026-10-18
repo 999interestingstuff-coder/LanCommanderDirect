@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -71,6 +72,18 @@ namespace LanCommanderDirect
             return new LcSettingsView(GetOrCreateSettings(), PlayniteApi);
         }
 
+        /// <summary>Same as LoadConfig, but never creates files or shows notifications. Null if not filled in yet.</summary>
+        public LcConfig LoadConfigQuiet()
+        {
+            var cfg = ReadRawConfig();
+            if (string.IsNullOrWhiteSpace(cfg.ServerUrl) || string.IsNullOrWhiteSpace(cfg.Username) || string.IsNullOrWhiteSpace(cfg.Password))
+                return null;
+
+            if (string.IsNullOrWhiteSpace(cfg.InstallRoot))
+                cfg.InstallRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Games", "LANCommander");
+            return cfg;
+        }
+
         /// <summary>Loads config.json (creating a template on first run). Returns null if not filled in yet.</summary>
         public LcConfig LoadConfig()
         {
@@ -103,6 +116,46 @@ namespace LanCommanderDirect
             return cfg;
         }
 
+        // ---------- server snapshot (server-state.json) ----------
+
+        string StatePath { get { return Path.Combine(GetPluginUserDataPath(), "server-state.json"); } }
+        string AppliedPath { get { return Path.Combine(GetPluginUserDataPath(), "applied.json"); } }
+
+        public Dictionary<string, LcServerEntry> LoadState()
+        {
+            try
+            {
+                if (File.Exists(StatePath))
+                {
+                    var d = JsonConvert.DeserializeObject<Dictionary<string, LcServerEntry>>(File.ReadAllText(StatePath));
+                    if (d != null) return d;
+                }
+            }
+            catch (Exception e) { logger.Warn(e, "LANCommander: could not read server-state.json"); }
+            return new Dictionary<string, LcServerEntry>();
+        }
+
+        /// <summary>Which server media file was last applied to which Playnite game ("gameId|kind" -> media id).</summary>
+        Dictionary<string, string> LoadApplied()
+        {
+            try
+            {
+                if (File.Exists(AppliedPath))
+                {
+                    var d = JsonConvert.DeserializeObject<Dictionary<string, string>>(File.ReadAllText(AppliedPath));
+                    if (d != null) return d;
+                }
+            }
+            catch (Exception e) { logger.Warn(e, "LANCommander: could not read applied.json"); }
+            return new Dictionary<string, string>();
+        }
+
+        void SaveApplied(Dictionary<string, string> applied)
+        {
+            try { File.WriteAllText(AppliedPath, JsonConvert.SerializeObject(applied)); }
+            catch (Exception e) { logger.Warn(e, "LANCommander: could not write applied.json"); }
+        }
+
         // ---------- library import ----------
 
         public override IEnumerable<GameMetadata> GetGames(LibraryGetGamesArgs args)
@@ -120,10 +173,11 @@ namespace LanCommanderDirect
             }
 
             var mediaDir = Path.Combine(GetPluginUserDataPath(), "media");
+            var previous = LoadState();
 
             try
             {
-                return Task.Run(() => FetchAsync(cfg, installed, mediaDir, args.CancelToken)).GetAwaiter().GetResult();
+                return Task.Run(() => FetchAsync(cfg, installed, previous, mediaDir, args.CancelToken)).GetAwaiter().GetResult();
             }
             catch (Exception e)
             {
@@ -134,11 +188,23 @@ namespace LanCommanderDirect
             }
         }
 
-        async Task<List<GameMetadata>> FetchAsync(LcConfig cfg, Dictionary<string, string> installed, string mediaDir, CancellationToken ct)
+        static LcCachedFile Cached(LcMedia media, string path)
+        {
+            return media == null || path == null ? null : new LcCachedFile { Id = media.Id, Path = path };
+        }
+
+        static List<string> Names(List<LcNamed> list)
+        {
+            if (list == null) return null;
+            return list.Where(x => x != null && !string.IsNullOrWhiteSpace(x.Name)).Select(x => x.Name.Trim()).ToList();
+        }
+
+        async Task<List<GameMetadata>> FetchAsync(LcConfig cfg, Dictionary<string, string> installed,
+            Dictionary<string, LcServerEntry> previous, string mediaDir, CancellationToken ct)
         {
             Directory.CreateDirectory(mediaDir);
             var result = new List<GameMetadata>();
-            var logos = new Dictionary<string, string>();   // server game id -> cached logo file
+            var state = new Dictionary<string, LcServerEntry>();
 
             using (var client = new LcClient(cfg))
             {
@@ -148,10 +214,11 @@ namespace LanCommanderDirect
                 {
                     // the list only has light records; the detail call adds media, developers, genres...
                     var g = item;
+                    bool detailOk = false;
                     try
                     {
                         var detail = await client.GetGameAsync(item.Id, ct).ConfigureAwait(false);
-                        if (detail != null) g = detail;
+                        if (detail != null) { g = detail; detailOk = true; }
                     }
                     catch (Exception e)
                     {
@@ -187,77 +254,498 @@ namespace LanCommanderDirect
                     if (g.Singleplayer)
                         meta.Features = new HashSet<MetadataProperty> { new MetadataNameProperty("Single Player") };
 
+                    // if the detail call failed, keep what the last good update knew instead of recording an empty game
+                    LcServerEntry old;
+                    if (!detailOk && previous.TryGetValue(gameId, out old))
+                    {
+                        state[gameId] = old;
+                        result.Add(meta);
+                        continue;
+                    }
+
+                    var entry = new LcServerEntry
+                    {
+                        GameId = gameId,
+                        Title = g.Title,
+                        Description = g.Description,
+                        Version = g.Version,
+                        ReleasedOn = g.ReleasedOn,
+                        Singleplayer = g.Singleplayer,
+                        Developers = Names(g.Developers),
+                        Publishers = Names(g.Publishers),
+                        Genres = Names(g.Genres),
+                        Tags = Names(g.Tags)
+                    };
+
+                    var latest = g.LatestArchive();
+                    if (latest != null)
+                    {
+                        entry.LatestArchiveId = latest.Id;
+                        entry.LatestArchiveVersion = latest.Version;
+                    }
+
                     // images: type 0 = icon, 1 = cover, 2 = background
-                    var icon = await CacheMediaAsync(client, FirstOfType(g, 0), mediaDir, ct).ConfigureAwait(false);
-                    if (icon != null) meta.Icon = new MetadataFile(icon);
+                    var iconM = FirstOfType(g, 0);
+                    var icon = await CacheMediaAsync(client, iconM, mediaDir, ct).ConfigureAwait(false);
+                    if (icon != null) { meta.Icon = new MetadataFile(icon); entry.Icon = Cached(iconM, icon); }
 
-                    var cover = await CacheMediaAsync(client, FirstOfType(g, 1), mediaDir, ct).ConfigureAwait(false);
-                    if (cover != null) meta.CoverImage = new MetadataFile(cover);
+                    var coverM = FirstOfType(g, 1);
+                    var cover = await CacheMediaAsync(client, coverM, mediaDir, ct).ConfigureAwait(false);
+                    if (cover != null) { meta.CoverImage = new MetadataFile(cover); entry.Cover = Cached(coverM, cover); }
 
-                    var bg = await CacheMediaAsync(client, FirstOfType(g, 2), mediaDir, ct).ConfigureAwait(false);
-                    if (bg != null) meta.BackgroundImage = new MetadataFile(bg);
+                    var bgM = FirstOfType(g, 2);
+                    var bg = await CacheMediaAsync(client, bgM, mediaDir, ct).ConfigureAwait(false);
+                    if (bg != null) { meta.BackgroundImage = new MetadataFile(bg); entry.Background = Cached(bgM, bg); }
 
-                    // type 4 = logo; Playnite has no logo field, so it is copied into ExtraMetadata after the import
-                    var logo = await CacheMediaAsync(client, FirstOfType(g, 4), mediaDir, ct).ConfigureAwait(false);
+                    // type 4 = logo; Playnite has no logo field, so it is copied into Extra Metadata after the import
+                    var logoM = FirstOfType(g, 4);
+                    var logo = await CacheMediaAsync(client, logoM, mediaDir, ct).ConfigureAwait(false);
                     if (logo != null && logo.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
-                        logos[gameId] = logo;
+                        entry.Logo = Cached(logoM, logo);
 
+                    // videos: a video whose name contains "micro" is the micro trailer, any other video is the trailer
+                    if (cfg.SyncVideos && g.Media != null)
+                    {
+                        var videos = g.Media.Where(m => m.IsVideo).ToList();
+                        var microM = videos.FirstOrDefault(m => m.IsMicro);
+                        var trailerM = videos.FirstOrDefault(m => !m.IsMicro);
+
+                        var trailer = await CacheMediaAsync(client, trailerM, mediaDir, ct).ConfigureAwait(false);
+                        if (trailer != null) entry.Trailer = Cached(trailerM, trailer);
+
+                        var micro = await CacheMediaAsync(client, microM, mediaDir, ct).ConfigureAwait(false);
+                        if (micro != null) entry.MicroTrailer = Cached(microM, micro);
+                    }
+
+                    state[gameId] = entry;
                     result.Add(meta);
                 }
             }
 
             try
             {
-                File.WriteAllText(Path.Combine(Path.GetDirectoryName(mediaDir), "logos.json"), JsonConvert.SerializeObject(logos));
+                File.WriteAllText(StatePath, JsonConvert.SerializeObject(state, Formatting.Indented));
             }
-            catch (Exception e) { logger.Warn(e, "Could not write logos.json"); }
+            catch (Exception e) { logger.Warn(e, "Could not write server-state.json"); }
 
             return result;
         }
 
-        // ---------- logos (Extra Metadata layout: ExtraMetadata\games\<Playnite game id>\Logo.png) ----------
+        // ---------- after a library update (and on startup) ----------
 
         public override void OnApplicationStarted(OnApplicationStartedEventArgs args)
         {
-            SyncLogos();
+            RunPostSync();
         }
 
         public override void OnLibraryUpdated(OnLibraryUpdatedEventArgs args)
         {
-            SyncLogos();
+            RunPostSync();
         }
 
-        void SyncLogos()
+        void RunPostSync()
+        {
+            var cfg = LoadConfigQuiet();
+            if (cfg == null) return;
+
+            try { ApplyServerState(cfg); }
+            catch (Exception e) { logger.Warn(e, "LANCommander: applying server metadata failed"); }
+
+            try { ScanInstalled(cfg); }
+            catch (Exception e) { logger.Warn(e, "LANCommander: scanning for installed games failed"); }
+
+            try { CheckUpdates(cfg, false); }
+            catch (Exception e) { logger.Warn(e, "LANCommander: update check failed"); }
+        }
+
+        // ---------- server is the source of truth: logos, videos and Playnite fields ----------
+
+        void ApplyServerState(LcConfig cfg)
+        {
+            var state = LoadState();
+            if (state.Count == 0) return;
+
+            var applied = LoadApplied();
+            bool dirty = false;
+            var root = Path.Combine(PlayniteApi.Paths.ConfigurationPath, "ExtraMetadata", "games");
+            var changed = new List<Game>();
+
+            foreach (var game in PlayniteApi.Database.Games.Where(g => g.PluginId == Id).ToList())
+            {
+                LcServerEntry e;
+                if (string.IsNullOrEmpty(game.GameId) || !state.TryGetValue(game.GameId, out e))
+                    continue;
+
+                // Extra Metadata layout: ExtraMetadata\games\<Playnite game id>\Logo.png, VideoTrailer.mp4, VideoMicrotrailer.mp4
+                var dir = Path.Combine(root, game.Id.ToString());
+                CopyExtra(game, e.Logo, dir, "Logo.png", applied, ref dirty);
+                if (cfg.SyncVideos)
+                {
+                    CopyExtra(game, e.Trailer, dir, "VideoTrailer.mp4", applied, ref dirty);
+                    CopyExtra(game, e.MicroTrailer, dir, "VideoMicrotrailer.mp4", applied, ref dirty);
+                }
+
+                if (cfg.SyncMetadata && ApplyFields(game, e, applied, ref dirty))
+                    changed.Add(game);
+            }
+
+            if (changed.Count > 0)
+                PlayniteApi.Database.Games.Update(changed);
+            if (dirty)
+                SaveApplied(applied);
+        }
+
+        /// <summary>Copies a cached server file into Extra Metadata when the server's file is new or the target is missing.</summary>
+        void CopyExtra(Game game, LcCachedFile file, string dir, string targetName, Dictionary<string, string> applied, ref bool dirty)
         {
             try
             {
-                var mapPath = Path.Combine(GetPluginUserDataPath(), "logos.json");
-                if (!File.Exists(mapPath)) return;
+                if (file == null || string.IsNullOrEmpty(file.Path) || !File.Exists(file.Path)) return;
 
-                var map = JsonConvert.DeserializeObject<Dictionary<string, string>>(File.ReadAllText(mapPath));
-                if (map == null || map.Count == 0) return;
+                var dest = Path.Combine(dir, targetName);
+                var key = game.Id + "|" + targetName;
+                string last;
+                applied.TryGetValue(key, out last);
+                if (File.Exists(dest) && last == file.Id.ToString()) return;
 
-                var root = Path.Combine(PlayniteApi.Paths.ConfigurationPath, "ExtraMetadata", "games");
+                Directory.CreateDirectory(dir);
+                File.Copy(file.Path, dest, true);
+                applied[key] = file.Id.ToString();
+                dirty = true;
+                logger.Info("LANCommander: placed " + targetName + " for " + game.Name);
+            }
+            catch (Exception e)
+            {
+                logger.Warn(e, "LANCommander: could not place " + targetName + " for " + game.Name);
+            }
+        }
 
-                foreach (var game in PlayniteApi.Database.Games.Where(g => g.PluginId == Id).ToList())
+        /// <summary>Overwrites the Playnite game's fields with the server's. Returns true if anything changed.</summary>
+        bool ApplyFields(Game game, LcServerEntry e, Dictionary<string, string> applied, ref bool dirty)
+        {
+            bool changed = false;
+            var db = PlayniteApi.Database;
+
+            if (!string.IsNullOrWhiteSpace(e.Title) && game.Name != e.Title) { game.Name = e.Title; changed = true; }
+            if (!string.IsNullOrWhiteSpace(e.Description) && game.Description != e.Description) { game.Description = e.Description; changed = true; }
+            if (!string.IsNullOrWhiteSpace(e.Version) && game.Version != e.Version) { game.Version = e.Version; changed = true; }
+
+            if (e.ReleasedOn.HasValue && e.ReleasedOn.Value.Year > 1900)
+            {
+                var rd = new ReleaseDate(e.ReleasedOn.Value);
+                if (!game.ReleaseDate.HasValue || !game.ReleaseDate.Value.Equals(rd)) { game.ReleaseDate = rd; changed = true; }
+            }
+
+            // developers, publishers and genres follow the server; tags and features are only added to, so your own tags survive
+            changed |= SyncIds(game.DeveloperIds, v => game.DeveloperIds = v, db.Companies, e.Developers, true);
+            changed |= SyncIds(game.PublisherIds, v => game.PublisherIds = v, db.Companies, e.Publishers, true);
+            changed |= SyncIds(game.GenreIds, v => game.GenreIds = v, db.Genres, e.Genres, true);
+            changed |= SyncIds(game.TagIds, v => game.TagIds = v, db.Tags, e.Tags, false);
+            if (e.Singleplayer)
+                changed |= SyncIds(game.FeatureIds, v => game.FeatureIds = v, db.Features, new List<string> { "Single Player" }, false);
+
+            changed |= SyncImage(game, e.Icon, "icon", () => game.Icon, v => game.Icon = v, applied, ref dirty);
+            changed |= SyncImage(game, e.Cover, "cover", () => game.CoverImage, v => game.CoverImage = v, applied, ref dirty);
+            changed |= SyncImage(game, e.Background, "background", () => game.BackgroundImage, v => game.BackgroundImage = v, applied, ref dirty);
+
+            return changed;
+        }
+
+        bool SyncIds<T>(List<Guid> current, Action<List<Guid>> set, IItemCollection<T> collection, List<string> names, bool replace)
+            where T : DatabaseObject
+        {
+            if (names == null || names.Count == 0) return false;
+
+            var wanted = new List<Guid>();
+            foreach (var name in names)
+            {
+                var item = collection.FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase)) ?? collection.Add(name);
+                wanted.Add(item.Id);
+            }
+
+            var cur = current ?? new List<Guid>();
+            var result = replace ? wanted : cur.Union(wanted).ToList();
+            if (new HashSet<Guid>(result).SetEquals(cur)) return false;
+
+            set(result);
+            return true;
+        }
+
+        bool SyncImage(Game game, LcCachedFile file, string kind, Func<string> get, Action<string> set,
+            Dictionary<string, string> applied, ref bool dirty)
+        {
+            if (file == null || string.IsNullOrEmpty(file.Path) || !File.Exists(file.Path)) return false;
+
+            var key = game.Id + "|" + kind;
+            string last;
+            applied.TryGetValue(key, out last);
+            if (last == file.Id.ToString() && !string.IsNullOrEmpty(get())) return false;
+
+            try
+            {
+                var newId = PlayniteApi.Database.AddFile(file.Path, game.Id);
+                var old = get();
+                if (!string.IsNullOrEmpty(old))
                 {
-                    string src;
-                    if (string.IsNullOrEmpty(game.GameId) || !map.TryGetValue(game.GameId, out src) || !File.Exists(src))
-                        continue;
+                    try { PlayniteApi.Database.RemoveFile(old); } catch { }
+                }
+                set(newId);
+                applied[key] = file.Id.ToString();
+                dirty = true;
+                return true;
+            }
+            catch (Exception e)
+            {
+                logger.Warn(e, "LANCommander: could not set the " + kind + " image for " + game.Name);
+                return false;
+            }
+        }
 
-                    var dir = Path.Combine(root, game.Id.ToString());
-                    var dest = Path.Combine(dir, "Logo.png");
-                    if (File.Exists(dest)) continue;   // never overwrite a logo that is already there
+        // ---------- detect games that are already installed in the install folder ----------
 
-                    Directory.CreateDirectory(dir);
-                    File.Copy(src, dest);
-                    logger.Info("LANCommander: placed logo for " + game.Name);
+        class DetectedGame
+        {
+            public Game Game;
+            public string Dir;
+            public GameAction Action;
+            public LcInstallMarker Marker;
+        }
+
+        /// <summary>
+        /// Looks through the install folder for game folders Playnite doesn't know are installed. A folder is
+        /// recognised by its marker file, or (for games installed by hand or by an older version) by its name.
+        /// Returns how many games were found; the library is updated in the background.
+        /// </summary>
+        public int ScanInstalled(LcConfig cfg)
+        {
+            var state = LoadState();
+            var games = PlayniteApi.Database.Games.Where(g => g.PluginId == Id).ToList();
+
+            // installed games that predate the marker file: assume they match the newest archive
+            foreach (var g in games.Where(x => x.IsInstalled && !string.IsNullOrEmpty(x.InstallDirectory) && !string.IsNullOrEmpty(x.GameId)))
+            {
+                try
+                {
+                    LcServerEntry e;
+                    if (!Directory.Exists(g.InstallDirectory) || LcInstallMarker.Read(g.InstallDirectory) != null) continue;
+                    if (!state.TryGetValue(g.GameId, out e) || !e.LatestArchiveId.HasValue) continue;
+
+                    LcInstallMarker.Write(g.InstallDirectory, new LcInstallMarker
+                    {
+                        GameId = g.GameId,
+                        ArchiveId = e.LatestArchiveId,
+                        ArchiveVersion = e.LatestArchiveVersion,
+                        InstalledOn = DateTime.UtcNow
+                    });
+                }
+                catch (Exception ex) { logger.Warn(ex, "LANCommander: could not write a marker for " + g.Name); }
+            }
+
+            var missing = games.Where(g => !g.IsInstalled && !string.IsNullOrEmpty(g.GameId)).ToList();
+            if (missing.Count == 0 || string.IsNullOrWhiteSpace(cfg.InstallRoot) || !Directory.Exists(cfg.InstallRoot))
+                return 0;
+
+            var byId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var byName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var wanted = new HashSet<string>(missing.Select(g => LcPaths.Sanitize(g.Name)), StringComparer.OrdinalIgnoreCase);
+
+            foreach (var dir in Directory.GetDirectories(cfg.InstallRoot))
+            {
+                var folder = Path.GetFileName(dir.TrimEnd('\\'));
+                if (folder.StartsWith(".")) continue;
+
+                var markerDir = dir;
+                var m = LcInstallMarker.Read(dir);
+                if (m == null)
+                {
+                    foreach (var sub in SafeDirectories(dir))
+                    {
+                        m = LcInstallMarker.Read(sub);
+                        if (m != null) { markerDir = sub; break; }
+                    }
+                }
+
+                if (m != null) { byId[m.GameId] = markerDir; continue; }
+
+                // no marker: only trust a folder that really contains a program
+                var candidate = dir;
+                if (SafeFiles(dir).Length == 0)
+                {
+                    var subs = SafeDirectories(dir);
+                    if (subs.Length == 1) candidate = subs[0];   // older "Game\Game\" layout
+                }
+                if (wanted.Contains(folder) && HasExe(candidate)) byName[folder] = candidate;
+            }
+
+            var found = new List<DetectedGame>();
+            foreach (var g in missing)
+            {
+                string dir;
+                if (!byId.TryGetValue(g.GameId, out dir) && !byName.TryGetValue(LcPaths.Sanitize(g.Name), out dir))
+                    continue;
+                found.Add(new DetectedGame { Game = g, Dir = dir.TrimEnd('\\') });
+            }
+
+            if (found.Count == 0) return 0;
+
+            Task.Run(() => FinishDetection(cfg, found, state));
+            return found.Count;
+        }
+
+        static string[] SafeDirectories(string dir)
+        {
+            try { return Directory.GetDirectories(dir); } catch { return new string[0]; }
+        }
+
+        static string[] SafeFiles(string dir)
+        {
+            try { return Directory.GetFiles(dir); } catch { return new string[0]; }
+        }
+
+        static bool HasExe(string dir)
+        {
+            try { return Directory.EnumerateFiles(dir, "*.exe", SearchOption.AllDirectories).Any(); }
+            catch { return false; }
+        }
+
+        void FinishDetection(LcConfig cfg, List<DetectedGame> found, Dictionary<string, LcServerEntry> state)
+        {
+            try
+            {
+                using (var client = new LcClient(cfg))
+                {
+                    foreach (var d in found)
+                    {
+                        LcGame info = null;
+                        try
+                        {
+                            var id = Guid.Parse(d.Game.GameId);
+                            info = client.GetGameAsync(id, CancellationToken.None).GetAwaiter().GetResult();
+                            try
+                            {
+                                var manifest = client.GetManifestAsync(id, CancellationToken.None).GetAwaiter().GetResult();
+                                if ((info.Actions == null || info.Actions.Count == 0) && manifest != null && manifest.Actions != null && manifest.Actions.Count > 0)
+                                    info.Actions = manifest.Actions;
+                            }
+                            catch (Exception e) { logger.Warn(e, "LANCommander: could not read the manifest for " + d.Game.Name); }
+                        }
+                        catch (Exception e)
+                        {
+                            logger.Warn(e, "LANCommander: could not load server details for " + d.Game.Name + ", guessing the exe instead");
+                        }
+
+                        try { d.Action = LcLaunch.BuildPlayAction(d.Dir, info); }
+                        catch (Exception e) { logger.Warn(e, "LANCommander: could not work out a play action for " + d.Game.Name); }
+
+                        // a folder found by name is assumed to hold the newest archive; a marker that already exists is kept
+                        if (LcInstallMarker.Read(d.Dir) == null)
+                        {
+                            var latest = info != null ? info.LatestArchive() : null;
+                            LcServerEntry e;
+                            state.TryGetValue(d.Game.GameId, out e);
+                            LcInstallMarker.Write(d.Dir, new LcInstallMarker
+                            {
+                                GameId = d.Game.GameId,
+                                ArchiveId = latest != null ? latest.Id : (e != null ? e.LatestArchiveId : null),
+                                ArchiveVersion = latest != null ? latest.Version : (e != null ? e.LatestArchiveVersion : null),
+                                InstalledOn = DateTime.UtcNow
+                            });
+                        }
+                    }
                 }
             }
             catch (Exception e)
             {
-                logger.Warn(e, "LANCommander: logo sync failed");
+                logger.Warn(e, "LANCommander: detection of installed games hit an error");
             }
+
+            PlayniteApi.MainView.UIDispatcher.Invoke(() =>
+            {
+                var updated = new List<Game>();
+                foreach (var d in found)
+                {
+                    var g = d.Game;
+                    if (g.IsInstalled) continue;   // installed in the meantime
+
+                    g.InstallDirectory = d.Dir;
+                    g.IsInstalled = true;
+
+                    if (d.Action != null)
+                    {
+                        if (g.GameActions == null)
+                            g.GameActions = new ObservableCollection<GameAction>();
+                        if (!g.GameActions.Any(a => a.IsPlayAction))
+                            g.GameActions.Add(d.Action);
+                    }
+                    updated.Add(g);
+                }
+
+                if (updated.Count == 0) return;
+
+                PlayniteApi.Database.Games.Update(updated);
+                PlayniteApi.Notifications.Add(new NotificationMessage(
+                    "lc-detected",
+                    "LANCommander: found " + updated.Count + " installed game(s) in the install folder: " +
+                    string.Join(", ", updated.Select(x => x.Name).Take(8)) + (updated.Count > 8 ? ", ..." : ""),
+                    NotificationType.Info));
+            });
+        }
+
+        // ---------- updates ----------
+
+        /// <summary>Installed games whose installed archive differs from the newest one on the server (as of the last library update).</summary>
+        public List<Game> FindOutdatedGames()
+        {
+            var state = LoadState();
+            var outdated = new List<Game>();
+
+            foreach (var g in PlayniteApi.Database.Games.Where(x => x.PluginId == Id && x.IsInstalled))
+            {
+                if (string.IsNullOrEmpty(g.GameId) || string.IsNullOrEmpty(g.InstallDirectory) || !Directory.Exists(g.InstallDirectory))
+                    continue;
+
+                LcServerEntry e;
+                if (!state.TryGetValue(g.GameId, out e) || !e.LatestArchiveId.HasValue) continue;
+
+                var m = LcInstallMarker.Read(g.InstallDirectory);
+                if (m == null || !m.ArchiveId.HasValue) continue;
+
+                if (m.ArchiveId.Value != e.LatestArchiveId.Value)
+                    outdated.Add(g);
+            }
+            return outdated;
+        }
+
+        /// <summary>Tells the user which games have updates and, if auto-update is on, starts them. Returns the games found.</summary>
+        public List<Game> CheckUpdates(LcConfig cfg, bool interactive)
+        {
+            var outdated = FindOutdatedGames();
+
+            if (outdated.Count == 0)
+            {
+                PlayniteApi.Notifications.Remove("lc-updates");
+                return outdated;
+            }
+
+            var names = string.Join(", ", outdated.Select(x => x.Name).Take(8)) + (outdated.Count > 8 ? ", ..." : "");
+
+            if (cfg.AutoUpdate)
+            {
+                PlayniteApi.Notifications.Remove("lc-updates");
+                PlayniteApi.Notifications.Add(new NotificationMessage(
+                    "lc-updates", "LANCommander: updating " + outdated.Count + " game(s): " + names, NotificationType.Info));
+                LcUpdater.Enqueue(PlayniteApi, this, outdated);
+            }
+            else
+            {
+                PlayniteApi.Notifications.Remove("lc-updates");
+                PlayniteApi.Notifications.Add(new NotificationMessage(
+                    "lc-updates",
+                    "LANCommander: updates available for " + outdated.Count + " game(s): " + names +
+                    ". Right-click the game > LANCommander > Update.",
+                    NotificationType.Info));
+            }
+            return outdated;
         }
 
         static HashSet<MetadataProperty> ToProps(List<LcNamed> list)
@@ -274,7 +762,7 @@ namespace LanCommanderDirect
             return g.Media == null ? null : g.Media.FirstOrDefault(m => m.Type == type);
         }
 
-        /// <summary>Playnite fetches image URLs without auth headers, so cache them locally first.</summary>
+        /// <summary>Playnite fetches image URLs without auth headers, so cache them locally first (videos are cached the same way).</summary>
         static async Task<string> CacheMediaAsync(LcClient client, LcMedia media, string mediaDir, CancellationToken ct)
         {
             if (media == null) return null;
@@ -289,7 +777,7 @@ namespace LanCommanderDirect
             {
                 await client.DownloadMediaAsync(media.Id, tmp, ct).ConfigureAwait(false);
 
-                var ext = SniffImageExtension(tmp);
+                var ext = SniffExtension(tmp);
                 var final = Path.Combine(mediaDir, media.Id + ext);
                 if (File.Exists(final)) File.Delete(final);
                 File.Move(tmp, final);
@@ -303,7 +791,7 @@ namespace LanCommanderDirect
             }
         }
 
-        static string SniffImageExtension(string path)
+        static string SniffExtension(string path)
         {
             var b = new byte[12];
             using (var fs = File.OpenRead(path))
@@ -313,6 +801,8 @@ namespace LanCommanderDirect
             if (b[0] == 0xFF && b[1] == 0xD8) return ".jpg";
             if (b[0] == 0x00 && b[1] == 0x00 && b[2] == 0x01 && b[3] == 0x00) return ".ico";
             if (b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46) return ".gif";
+            if (b[4] == 0x66 && b[5] == 0x74 && b[6] == 0x79 && b[7] == 0x70) return ".mp4";          // "ftyp"
+            if (b[0] == 0x1A && b[1] == 0x45 && b[2] == 0xDF && b[3] == 0xA3) return ".webm";
             if (b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46) return ".webp";
             return ".png";
         }
@@ -401,63 +891,69 @@ namespace LanCommanderDirect
             }
         }
 
-        // ---------- playtime backup (main menu) ----------
+        // ---------- menus ----------
+
+        public override IEnumerable<GameMenuItem> GetGameMenuItems(GetGameMenuItemsArgs args)
+        {
+            var games = args.Games
+                .Where(g => g.PluginId == Id && g.IsInstalled && !string.IsNullOrEmpty(g.InstallDirectory))
+                .ToList();
+            if (games.Count == 0)
+                yield break;
+
+            yield return new GameMenuItem
+            {
+                Description = "Update (extract newest archive over the install)",
+                MenuSection = "LANCommander",
+                Action = a => LcUpdater.Enqueue(PlayniteApi, this, games)
+            };
+        }
 
         public override IEnumerable<MainMenuItem> GetMainMenuItems(GetMainMenuItemsArgs args)
         {
             yield return new MainMenuItem
             {
-                Description = "Export playtime backup...",
+                Description = "Scan install folder for installed games",
                 MenuSection = "@LANCommander",
-                Action = a => ExportPlaytimeBackup()
+                Action = a => ScanFromMenu()
             };
             yield return new MainMenuItem
             {
-                Description = "Import playtime backup (only raises playtime)...",
+                Description = "Check for game updates",
                 MenuSection = "@LANCommander",
-                Action = a => ImportPlaytimeBackup()
+                Action = a => CheckUpdatesFromMenu()
             };
         }
 
-        void ExportPlaytimeBackup()
+        void ScanFromMenu()
         {
+            var cfg = LoadConfig();
+            if (cfg == null) return;
+
             try
             {
-                var path = PlayniteApi.Dialogs.SaveFile("Playtime backup|*.json");
-                if (string.IsNullOrEmpty(path)) return;
-                if (string.IsNullOrEmpty(Path.GetExtension(path))) path += ".json";
-
-                var count = LcPlaytime.Export(PlayniteApi, path);
-                PlayniteApi.Dialogs.ShowMessage("Saved the playtime of " + count + " game(s) to:\n" + path, "LANCommander");
-            }
-            catch (Exception e)
-            {
-                logger.Error(e, "LANCommander: playtime export failed");
-                PlayniteApi.Dialogs.ShowErrorMessage("Could not save the playtime backup: " + e.Message, "LANCommander");
-            }
-        }
-
-        void ImportPlaytimeBackup()
-        {
-            try
-            {
-                var path = PlayniteApi.Dialogs.SelectFile("Playtime backup|*.json");
-                if (string.IsNullOrEmpty(path)) return;
-
-                var r = LcPlaytime.Import(PlayniteApi, path);
+                var count = ScanInstalled(cfg);
                 PlayniteApi.Dialogs.ShowMessage(
-                    "Playtime backup applied.\n\n" +
-                    "Raised: " + r.Raised + " game(s)\n" +
-                    "Already the same or higher: " + r.Unchanged + "\n" +
-                    "Not found in this library: " + r.NoMatch + "\n" +
-                    "(" + r.Total + " game(s) in the file)",
+                    count > 0
+                        ? "Found " + count + " installed game(s) in " + cfg.InstallRoot + ". They are being added in the background."
+                        : "No new installed games found in " + cfg.InstallRoot + ". Games must be in a folder named like the game, or have been installed by this plugin.",
                     "LANCommander");
             }
             catch (Exception e)
             {
-                logger.Error(e, "LANCommander: playtime import failed");
-                PlayniteApi.Dialogs.ShowErrorMessage("Could not read the playtime backup: " + e.Message, "LANCommander");
+                logger.Error(e, "LANCommander: scan failed");
+                PlayniteApi.Dialogs.ShowErrorMessage("Scan failed: " + e.Message, "LANCommander");
             }
+        }
+
+        void CheckUpdatesFromMenu()
+        {
+            var cfg = LoadConfig();
+            if (cfg == null) return;
+
+            var outdated = CheckUpdates(cfg, true);
+            if (outdated.Count == 0)
+                PlayniteApi.Dialogs.ShowMessage("All installed LANCommander games match the newest archive as of the last library update. Update the library first to pick up newly uploaded archives.", "LANCommander");
         }
 
         // ---------- install / uninstall ----------

@@ -193,6 +193,350 @@ namespace LanCommanderDirect
         }
     }
 
+    /// <summary>Background job bookkeeping and the shared progress notification used by installs and updates.</summary>
+    static class LcJobs
+    {
+        static readonly ILogger logger = LogManager.GetLogger();
+        static readonly System.Collections.Generic.HashSet<Guid> running = new System.Collections.Generic.HashSet<Guid>();
+
+        /// <summary>False if an install or update is already running for this game.</summary>
+        public static bool TryBegin(Guid gameId) { lock (running) return running.Add(gameId); }
+        public static void End(Guid gameId) { lock (running) running.Remove(gameId); }
+
+        public static LcProgress MakeProgress(IPlayniteAPI api, string noteId, CancellationToken ct)
+        {
+            int lastBucket = -1;
+            return new LcProgress(ct, p =>
+            {
+                var percent = Math.Round(p.CurrentProgressValue);
+                var message = (p.Text ?? "").TrimEnd('.') + " " + percent + "%" +
+                              (p.BytesTotal > 0 ? " (" + LcFormat.Bytes(p.BytesDone) + " of " + LcFormat.Bytes(p.BytesTotal) + ")" : "");
+
+                // also write every 10% to extensions.log, so progress can be checked even if the notification doesn't refresh
+                var bucket = (int)(percent / 10);
+                if (bucket != lastBucket)
+                {
+                    lastBucket = bucket;
+                    logger.Info("LANCommander: " + message);
+                }
+
+                // notifications are replaced by removing the old one first, and are changed on the UI thread
+                api.MainView.UIDispatcher.BeginInvoke(new Action(() =>
+                {
+                    try
+                    {
+                        api.Notifications.Remove(noteId);
+                        api.Notifications.Add(new NotificationMessage(noteId, message, NotificationType.Info));
+                    }
+                    catch (Exception e) { logger.Warn(e, "LANCommander: could not update the progress notification"); }
+                }));
+            });
+        }
+    }
+
+    /// <summary>Download / extract / layout steps shared by install and update.</summary>
+    static class LcArchiveOps
+    {
+        static readonly ILogger logger = LogManager.GetLogger();
+
+        /// <summary>Download next to the install folder so a multi-GB archive doesn't fill the system drive's temp folder.</summary>
+        public static string DownloadDir(LcConfig cfg)
+        {
+            var tmpDir = Path.Combine(cfg.InstallRoot, ".lc-downloads");
+            try { Directory.CreateDirectory(tmpDir); }
+            catch
+            {
+                tmpDir = Path.Combine(Path.GetTempPath(), "LanCommanderDirect");
+                Directory.CreateDirectory(tmpDir);
+            }
+            return tmpDir;
+        }
+
+        public static void Download(LcClient client, Guid id, LcArchive archive, string file, string gameName, LcProgress p, CancellationToken ct)
+        {
+            p.Text = "Downloading " + gameName + "...";
+            p.ProgressMaxValue = 100;
+            p.CurrentProgressValue = 0;
+
+            var hint = archive.CompressedSize;
+            Task.Run(() => client.DownloadGameAsync(id, file, hint, (done, total) =>
+            {
+                p.BytesDone = done;
+                p.BytesTotal = total;
+                if (total > 0) p.CurrentProgressValue = done * 100.0 / total;
+            }, ct)).GetAwaiter().GetResult();
+
+            var size = new FileInfo(file).Length;
+            logger.Info("LANCommander: downloaded " + size + " bytes to " + file);
+            if (size < 4096)
+                throw new InvalidOperationException("Download is only " + size + " bytes, not a game archive: " + File.ReadAllText(file));
+        }
+
+        public static void Extract(LcConfig cfg, string file, string destDir, string gameName, LcProgress p, CancellationToken ct)
+        {
+            Directory.CreateDirectory(destDir);
+
+            p.BytesDone = 0;
+            p.BytesTotal = 0;
+            p.Text = "Extracting " + gameName + "...";
+            p.CurrentProgressValue = 0;
+
+            if (LcExtract.IsZip(file))
+                LcExtract.ExtractZip(file, destDir, pct => p.CurrentProgressValue = pct, ct);
+            else
+                LcExtract.Extract7z(LcPaths.FindSevenZip(cfg), file, destDir, ct);
+
+            if (!Directory.EnumerateFileSystemEntries(destDir).Any())
+                throw new InvalidOperationException("The archive extracted nothing.");
+        }
+
+        /// <summary>
+        /// Archives that wrap everything in one folder would end up as ...\Game\Game\. Lift the wrapper's
+        /// contents up one level instead: rename the wrapper out of the way, remove the (now empty) outer
+        /// folder and give the wrapper the outer folder's name. Renames stay on one drive, so this is instant.
+        /// Returns the folder the game ended up in.
+        /// </summary>
+        public static string Flatten(string dir)
+        {
+            var files = Directory.GetFiles(dir);
+            var subdirs = Directory.GetDirectories(dir);
+            if (files.Length != 0 || subdirs.Length != 1)
+                return dir;
+
+            var wrapper = subdirs[0].TrimEnd('\\');
+            var temp = dir + ".lc-flatten-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            try
+            {
+                Directory.Move(wrapper, temp);
+                Directory.Delete(dir);          // empty now
+                Directory.Move(temp, dir);
+            }
+            catch (Exception e)
+            {
+                logger.Warn(e, "LANCommander: could not flatten the wrapper folder, keeping the original layout");
+                try
+                {
+                    if (Directory.Exists(temp))
+                    {
+                        // put the game back where it was and install from inside the wrapper, as before
+                        Directory.CreateDirectory(dir);
+                        var restored = Path.Combine(dir, Path.GetFileName(wrapper));
+                        if (!Directory.Exists(restored)) Directory.Move(temp, restored);
+                        dir = restored;
+                    }
+                    else
+                    {
+                        var left = Directory.GetDirectories(dir);
+                        if (left.Length == 1) dir = left[0].TrimEnd('\\');
+                    }
+                }
+                catch (Exception e2)
+                {
+                    logger.Warn(e2, "LANCommander: could not restore the original layout either");
+                }
+            }
+            return dir;
+        }
+
+        /// <summary>Moves everything from src into dst, replacing files that already exist and keeping files that only exist in dst.</summary>
+        public static void MergeInto(string src, string dst, CancellationToken ct)
+        {
+            Directory.CreateDirectory(dst);
+
+            foreach (var file in Directory.GetFiles(src))
+            {
+                ct.ThrowIfCancellationRequested();
+                var target = Path.Combine(dst, Path.GetFileName(file));
+                if (File.Exists(target))
+                {
+                    File.SetAttributes(target, FileAttributes.Normal);
+                    File.Delete(target);
+                }
+                File.Move(file, target);
+            }
+
+            foreach (var sub in Directory.GetDirectories(src))
+                MergeInto(sub, Path.Combine(dst, Path.GetFileName(sub.TrimEnd('\\'))), ct);
+        }
+
+        /// <summary>
+        /// Downloads the newest archive and extracts it over the game's current folder. Files the game wrote
+        /// itself (saves, configs) stay unless the archive contains a file with the same path.
+        /// </summary>
+        public static LcGame Update(LcConfig cfg, Game game, LcProgress p)
+        {
+            var id = Guid.Parse(game.GameId);
+            var ct = p.CancelToken;
+            var installDir = (game.InstallDirectory ?? "").TrimEnd('\\');
+            if (string.IsNullOrEmpty(installDir) || !Directory.Exists(installDir))
+                throw new InvalidOperationException("The install folder no longer exists: " + installDir);
+
+            using (var client = new LcClient(cfg))
+            {
+                var detail = Task.Run(() => client.GetGameAsync(id, ct)).GetAwaiter().GetResult();
+                var archive = detail.LatestArchive();
+                if (archive == null)
+                    throw new InvalidOperationException("This game has no archive uploaded on the LANCommander server.");
+
+                var tmpDir = DownloadDir(cfg);
+                var file = Path.Combine(tmpDir, id + ".update.archive");
+                var staging = Path.Combine(tmpDir, id + ".update");
+
+                try
+                {
+                    if (Directory.Exists(staging)) Directory.Delete(staging, true);
+
+                    Download(client, id, archive, file, game.Name, p, ct);
+                    Extract(cfg, file, staging, game.Name, p, ct);
+
+                    // an archive with a single wrapper folder is merged from inside that folder
+                    var source = staging;
+                    if (Directory.GetFiles(staging).Length == 0 && Directory.GetDirectories(staging).Length == 1)
+                        source = Directory.GetDirectories(staging)[0];
+
+                    p.Text = "Installing update for " + game.Name + "...";
+                    p.CurrentProgressValue = 100;
+                    MergeInto(source, installDir, ct);
+                }
+                finally
+                {
+                    try { if (File.Exists(file)) File.Delete(file); } catch { }
+                    try { if (Directory.Exists(staging)) Directory.Delete(staging, true); } catch { }
+                }
+
+                LcInstallMarker.Write(installDir, new LcInstallMarker
+                {
+                    GameId = id.ToString(),
+                    ArchiveId = archive.Id,
+                    ArchiveVersion = archive.Version,
+                    InstalledOn = DateTime.UtcNow
+                });
+                return detail;
+            }
+        }
+    }
+
+    /// <summary>Works out the Play action for an installed game folder.</summary>
+    static class LcLaunch
+    {
+        static readonly ILogger logger = LogManager.GetLogger();
+
+        internal static string Str(JObject o, params string[] names)
+        {
+            foreach (var n in names)
+            {
+                var t = o.GetValue(n, StringComparison.OrdinalIgnoreCase);
+                if (t != null && t.Type != JTokenType.Null)
+                {
+                    var s = t.ToString();
+                    if (!string.IsNullOrWhiteSpace(s)) return s;
+                }
+            }
+            return null;
+        }
+
+        internal static bool Flag(JObject o, params string[] names)
+        {
+            foreach (var n in names)
+            {
+                var t = o.GetValue(n, StringComparison.OrdinalIgnoreCase);
+                bool b;
+                if (t != null && bool.TryParse(t.ToString(), out b) && b) return true;
+            }
+            return false;
+        }
+
+        /// <summary>Tries the launch action the server defines. Returns the exe's full path, or null.</summary>
+        internal static string ServerExe(string installDir, LcGame info, out string arguments, out string workingDirRel)
+        {
+            arguments = null;
+            workingDirRel = null;
+            if (info == null || info.Actions == null) return null;
+
+            var candidates = info.Actions.Where(a => a != null && Str(a, "path") != null).ToList();
+            if (candidates.Count == 0) return null;
+
+            var chosen = candidates.FirstOrDefault(a => Flag(a, "primaryAction", "isPrimaryAction", "primary")) ?? candidates[0];
+
+            var raw = Str(chosen, "path").Replace('/', '\\');
+            var expanded = Regex.Replace(raw, @"\{InstallDir\}", installDir.Replace("$", "$$"), RegexOptions.IgnoreCase);
+            if (!Path.IsPathRooted(expanded))
+                expanded = Path.Combine(installDir, expanded.TrimStart('\\'));
+
+            if (!File.Exists(expanded))
+            {
+                // the folder layout can differ from the server's path (for example a wrapper folder that was lifted
+                // up on install), so look for the same file name inside the install folder
+                var name = Path.GetFileName(expanded);
+                var found = string.IsNullOrEmpty(name) ? null :
+                    Directory.EnumerateFiles(installDir, name, SearchOption.AllDirectories)
+                        .OrderBy(f => f.Count(c => c == '\\'))
+                        .FirstOrDefault();
+                if (found == null) return null;
+                expanded = found;
+            }
+
+            arguments = Str(chosen, "arguments", "args");
+
+            var wdRaw = Str(chosen, "workingDirectory", "workingDir");
+            if (wdRaw != null)
+            {
+                var wd = Regex.Replace(wdRaw.Replace('/', '\\'), @"\{InstallDir\}", installDir.Replace("$", "$$"), RegexOptions.IgnoreCase);
+                if (!Path.IsPathRooted(wd))
+                    wd = Path.Combine(installDir, wd.TrimStart('\\'));
+                wd = Path.GetFullPath(wd).TrimEnd('\\');
+                if (Directory.Exists(wd) && wd.StartsWith(installDir, StringComparison.OrdinalIgnoreCase))
+                    workingDirRel = wd.Substring(installDir.Length).TrimStart('\\');
+            }
+
+            return Path.GetFullPath(expanded);
+        }
+
+        internal static string GuessExe(string installDir)
+        {
+            var skip = new[] { "unins", "crash", "redist", "vc_", "vcredist", "dxsetup", "dotnet", "notification_helper", "uninstall" };
+            return Directory.EnumerateFiles(installDir, "*.exe", SearchOption.AllDirectories)
+                .Where(f => !skip.Any(s => Path.GetFileName(f).IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0))
+                .OrderBy(f => f.Count(c => c == '\\'))          // shallowest first
+                .ThenByDescending(f => new FileInfo(f).Length)  // then largest
+                .FirstOrDefault();
+        }
+
+        /// <summary>The Play action for a game folder: the server's launch action if it matches, otherwise a guessed exe. Null if no exe.</summary>
+        public static GameAction BuildPlayAction(string installDir, LcGame info)
+        {
+            string arguments, serverWorkDir;
+            var exe = ServerExe(installDir, info, out arguments, out serverWorkDir);
+            if (exe != null)
+                logger.Info("LANCommander: using the server's launch action: " + exe +
+                            (string.IsNullOrWhiteSpace(arguments) ? "" : " with arguments: " + arguments));
+            else
+            {
+                exe = GuessExe(installDir);
+                if (exe != null) logger.Info("LANCommander: no usable server action, guessed exe: " + exe);
+            }
+
+            if (exe == null) return null;
+
+            var rel = exe.Substring(installDir.Length).TrimStart('\\');
+            var dirRel = Path.GetDirectoryName(rel) ?? "";
+
+            var action = new GameAction
+            {
+                Name = "Play",
+                Type = GameActionType.File,
+                Path = "{InstallDir}\\" + rel,
+                WorkingDir = serverWorkDir != null
+                    ? (serverWorkDir.Length > 0 ? "{InstallDir}\\" + serverWorkDir : "{InstallDir}")
+                    : (dirRel.Length > 0 ? "{InstallDir}\\" + dirRel : "{InstallDir}"),
+                IsPlayAction = true
+            };
+            if (!string.IsNullOrWhiteSpace(arguments))
+                action.Arguments = arguments;
+            return action;
+        }
+    }
+
     public class LcInstallController : InstallController
     {
         static readonly ILogger logger = LogManager.GetLogger();
@@ -226,33 +570,7 @@ namespace LanCommanderDirect
             cts = new CancellationTokenSource();
             var gameName = Game.Name;
             var noteId = "lc-install-" + Game.Id;
-
-            int lastBucket = -1;
-            var progress = new LcProgress(cts.Token, p =>
-            {
-                var percent = Math.Round(p.CurrentProgressValue);
-                var message = (p.Text ?? "").TrimEnd('.') + " " + percent + "%" +
-                              (p.BytesTotal > 0 ? " (" + LcFormat.Bytes(p.BytesDone) + " of " + LcFormat.Bytes(p.BytesTotal) + ")" : "");
-
-                // also write every 10% to extensions.log, so progress can be checked even if the notification doesn't refresh
-                var bucket = (int)(percent / 10);
-                if (bucket != lastBucket)
-                {
-                    lastBucket = bucket;
-                    logger.Info("LANCommander: " + message);
-                }
-
-                // notifications are replaced by removing the old one first, and are changed on the UI thread
-                api.MainView.UIDispatcher.BeginInvoke(new Action(() =>
-                {
-                    try
-                    {
-                        api.Notifications.Remove(noteId);
-                        api.Notifications.Add(new NotificationMessage(noteId, message, NotificationType.Info));
-                    }
-                    catch (Exception e) { logger.Warn(e, "LANCommander: could not update the progress notification"); }
-                }));
-            });
+            var progress = LcJobs.MakeProgress(api, noteId, cts.Token);
 
             Task.Run(() =>
             {
@@ -319,59 +637,22 @@ namespace LanCommanderDirect
                     logger.Warn(e, "LANCommander: could not read the game manifest");
                 }
 
-                var archive = (detail.Archives ?? new System.Collections.Generic.List<LcArchive>())
-                    .OrderByDescending(a => a.CreatedOn ?? DateTime.MinValue)
-                    .FirstOrDefault();
+                var archive = detail.LatestArchive();
                 if (archive == null)
                     throw new InvalidOperationException("This game has no archive uploaded on the LANCommander server yet.");
 
                 var dir = Path.GetFullPath(Path.Combine(cfg.InstallRoot, LcPaths.Sanitize(Game.Name))).TrimEnd('\\');
-
-                // download next to the install folder so a multi-GB archive doesn't fill the system drive's temp folder
-                var tmpDir = Path.Combine(cfg.InstallRoot, ".lc-downloads");
-                try { Directory.CreateDirectory(tmpDir); }
-                catch
-                {
-                    tmpDir = Path.Combine(Path.GetTempPath(), "LanCommanderDirect");
-                    Directory.CreateDirectory(tmpDir);
-                }
-                var file = Path.Combine(tmpDir, id + ".archive");
+                var file = Path.Combine(LcArchiveOps.DownloadDir(cfg), id + ".archive");
 
                 bool createdDir = false;
                 try
                 {
-                    p.Text = "Downloading " + Game.Name + "...";
-                    p.ProgressMaxValue = 100;
-                    p.CurrentProgressValue = 0;
-
-                    var hint = archive.CompressedSize;
-                    Task.Run(() => client.DownloadGameAsync(id, file, hint, (done, total) =>
-                    {
-                        p.BytesDone = done;
-                        p.BytesTotal = total;
-                        if (total > 0) p.CurrentProgressValue = done * 100.0 / total;
-                    }, ct)).GetAwaiter().GetResult();
-
-                    var size = new FileInfo(file).Length;
-                    logger.Info("LANCommander: downloaded " + size + " bytes to " + file);
-                    if (size < 4096)
-                        throw new InvalidOperationException("Download is only " + size + " bytes, not a game archive: " + File.ReadAllText(file));
+                    LcArchiveOps.Download(client, id, archive, file, Game.Name, p, ct);
 
                     createdDir = !Directory.Exists(dir);
                     Directory.CreateDirectory(dir);
 
-                    p.BytesDone = 0;
-                    p.BytesTotal = 0;
-                    p.Text = "Extracting " + Game.Name + "...";
-                    p.CurrentProgressValue = 0;
-
-                    if (LcExtract.IsZip(file))
-                        LcExtract.ExtractZip(file, dir, pct => p.CurrentProgressValue = pct, ct);
-                    else
-                        LcExtract.Extract7z(LcPaths.FindSevenZip(cfg), file, dir, ct);
-
-                    if (!Directory.EnumerateFileSystemEntries(dir).Any())
-                        throw new InvalidOperationException("The archive extracted nothing.");
+                    LcArchiveOps.Extract(cfg, file, dir, Game.Name, p, ct);
                 }
                 catch
                 {
@@ -384,168 +665,29 @@ namespace LanCommanderDirect
                     try { if (File.Exists(file)) File.Delete(file); } catch { }
                 }
 
-                // Archives that wrap everything in one folder would end up as ...\Game\Game\. Lift the wrapper's
-                // contents up one level instead: rename the wrapper out of the way, remove the (now empty) outer
-                // folder and give the wrapper the outer folder's name. Renames stay on one drive, so this is instant.
-                var files = Directory.GetFiles(dir);
-                var subdirs = Directory.GetDirectories(dir);
-                if (files.Length == 0 && subdirs.Length == 1)
+                dir = LcArchiveOps.Flatten(dir);
+
+                // remember which archive this is, so a newer upload can be recognised as an update
+                LcInstallMarker.Write(dir, new LcInstallMarker
                 {
-                    var wrapper = subdirs[0].TrimEnd('\\');
-                    var temp = dir + ".lc-flatten-" + Guid.NewGuid().ToString("N").Substring(0, 8);
-                    try
-                    {
-                        Directory.Move(wrapper, temp);
-                        Directory.Delete(dir);          // empty now
-                        Directory.Move(temp, dir);
-                    }
-                    catch (Exception e)
-                    {
-                        logger.Warn(e, "LANCommander: could not flatten the wrapper folder, keeping the original layout");
-                        try
-                        {
-                            if (Directory.Exists(temp))
-                            {
-                                // put the game back where it was and install from inside the wrapper, as before
-                                Directory.CreateDirectory(dir);
-                                var restored = Path.Combine(dir, Path.GetFileName(wrapper));
-                                if (!Directory.Exists(restored)) Directory.Move(temp, restored);
-                                dir = restored;
-                            }
-                            else
-                            {
-                                var left = Directory.GetDirectories(dir);
-                                if (left.Length == 1) dir = left[0].TrimEnd('\\');
-                            }
-                        }
-                        catch (Exception e2)
-                        {
-                            logger.Warn(e2, "LANCommander: could not restore the original layout either");
-                        }
-                    }
-                }
+                    GameId = id.ToString(),
+                    ArchiveId = archive.Id,
+                    ArchiveVersion = archive.Version,
+                    InstalledOn = DateTime.UtcNow
+                });
 
                 return dir;
             }
         }
 
-        // ---------- play action ----------
-
-        static string Str(JObject o, params string[] names)
-        {
-            foreach (var n in names)
-            {
-                var t = o.GetValue(n, StringComparison.OrdinalIgnoreCase);
-                if (t != null && t.Type != JTokenType.Null)
-                {
-                    var s = t.ToString();
-                    if (!string.IsNullOrWhiteSpace(s)) return s;
-                }
-            }
-            return null;
-        }
-
-        static bool Flag(JObject o, params string[] names)
-        {
-            foreach (var n in names)
-            {
-                var t = o.GetValue(n, StringComparison.OrdinalIgnoreCase);
-                bool b;
-                if (t != null && bool.TryParse(t.ToString(), out b) && b) return true;
-            }
-            return false;
-        }
-
-        /// <summary>Tries the launch action the server defines. Returns the exe's full path, or null.</summary>
-        static string ServerExe(string installDir, LcGame info, out string arguments, out string workingDirRel)
-        {
-            arguments = null;
-            workingDirRel = null;
-            if (info == null || info.Actions == null) return null;
-
-            var candidates = info.Actions.Where(a => a != null && Str(a, "path") != null).ToList();
-            if (candidates.Count == 0) return null;
-
-            var chosen = candidates.FirstOrDefault(a => Flag(a, "primaryAction", "isPrimaryAction", "primary")) ?? candidates[0];
-
-            var raw = Str(chosen, "path").Replace('/', '\\');
-            var expanded = Regex.Replace(raw, @"\{InstallDir\}", installDir.Replace("$", "$$"), RegexOptions.IgnoreCase);
-            if (!Path.IsPathRooted(expanded))
-                expanded = Path.Combine(installDir, expanded.TrimStart('\\'));
-
-            if (!File.Exists(expanded))
-            {
-                // the folder layout can differ from the server's path (for example a wrapper folder that was lifted
-                // up on install), so look for the same file name inside the install folder
-                var name = Path.GetFileName(expanded);
-                var found = string.IsNullOrEmpty(name) ? null :
-                    Directory.EnumerateFiles(installDir, name, SearchOption.AllDirectories)
-                        .OrderBy(f => f.Count(c => c == '\\'))
-                        .FirstOrDefault();
-                if (found == null) return null;
-                expanded = found;
-            }
-
-            arguments = Str(chosen, "arguments", "args");
-
-            var wdRaw = Str(chosen, "workingDirectory", "workingDir");
-            if (wdRaw != null)
-            {
-                var wd = Regex.Replace(wdRaw.Replace('/', '\\'), @"\{InstallDir\}", installDir.Replace("$", "$$"), RegexOptions.IgnoreCase);
-                if (!Path.IsPathRooted(wd))
-                    wd = Path.Combine(installDir, wd.TrimStart('\\'));
-                wd = Path.GetFullPath(wd).TrimEnd('\\');
-                if (Directory.Exists(wd) && wd.StartsWith(installDir, StringComparison.OrdinalIgnoreCase))
-                    workingDirRel = wd.Substring(installDir.Length).TrimStart('\\');
-            }
-
-            return Path.GetFullPath(expanded);
-        }
-
-        static string GuessExe(string installDir)
-        {
-            var skip = new[] { "unins", "crash", "redist", "vc_", "vcredist", "dxsetup", "dotnet", "notification_helper", "uninstall" };
-            return Directory.EnumerateFiles(installDir, "*.exe", SearchOption.AllDirectories)
-                .Where(f => !skip.Any(s => Path.GetFileName(f).IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0))
-                .OrderBy(f => f.Count(c => c == '\\'))          // shallowest first
-                .ThenByDescending(f => new FileInfo(f).Length)  // then largest
-                .FirstOrDefault();
-        }
-
         void ApplyPlayAction(string installDir, LcGame info)
         {
-            string arguments, serverWorkDir;
-            var exe = ServerExe(installDir, info, out arguments, out serverWorkDir);
-            if (exe != null)
-                logger.Info("LANCommander: using the server's launch action: " + exe +
-                            (string.IsNullOrWhiteSpace(arguments) ? "" : " with arguments: " + arguments));
-            else
-            {
-                exe = GuessExe(installDir);
-                if (exe != null) logger.Info("LANCommander: no usable server action, guessed exe: " + exe);
-            }
-
-            if (exe == null)
+            var action = LcLaunch.BuildPlayAction(installDir, info);
+            if (action == null)
             {
                 api.Dialogs.ShowMessage("Installed, but no .exe was found. Add a play action to the game manually.", "LANCommander");
                 return;
             }
-
-            var rel = exe.Substring(installDir.Length).TrimStart('\\');
-            var dirRel = Path.GetDirectoryName(rel) ?? "";
-
-            var action = new GameAction
-            {
-                Name = "Play",
-                Type = GameActionType.File,
-                Path = "{InstallDir}\\" + rel,
-                WorkingDir = serverWorkDir != null
-                    ? (serverWorkDir.Length > 0 ? "{InstallDir}\\" + serverWorkDir : "{InstallDir}")
-                    : (dirRel.Length > 0 ? "{InstallDir}\\" + dirRel : "{InstallDir}"),
-                IsPlayAction = true
-            };
-            if (!string.IsNullOrWhiteSpace(arguments))
-                action.Arguments = arguments;
 
             Game.GameActions = new ObservableCollection<GameAction> { action };
             api.Database.Games.Update(Game);

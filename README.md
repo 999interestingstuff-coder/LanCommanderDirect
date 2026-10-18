@@ -2,7 +2,7 @@
 
 This version is intentionally split into two responsibilities:
 
-- **LANCommander Direct**: game library import, metadata, installation/uninstallation, launch integration, and LANCommander play-session reporting.
+- **LANCommander Direct**: game library import, metadata, installation/uninstallation, update detection, launch integration, and LANCommander play-session reporting.
 - **Ludusavi + Ludusavi for Playnite**: all save backup/restore handling.
 
 The LANCommander plugin no longer downloads, extracts, creates, or uploads LANCommander save archives and no longer uses LANCommander `savePaths`.
@@ -37,18 +37,6 @@ After building, copy the generated extension files into your Playnite Extensions
 
 Older versions of this plugin stored LANCommander save-sync state in `saves.json` and could have local save-backup ZIPs under the plugin data directory. They are no longer used. You may delete those old files after confirming Ludusavi is working.
 
-## Playtime backup (0.2.2)
-
-Playnite's main menu has a **LANCommander** section with two items:
-
-- **Export playtime backup...** saves the playtime of every game in your library (not only LANCommander games) to a JSON file.
-- **Import playtime backup (only raises playtime)...** reads such a file, for example on a new PC. A game's playtime is only
-  ever raised to the saved value, never lowered, so time played since the backup is kept.
-
-Games from a library are matched by library and the library's own game id, which stays the same on every PC.
-Games added by hand are matched by name, and only when exactly one game in the library has that name.
-The server is not involved.
-
 ## Install folder layout (0.2.3)
 
 If a game's archive has a single top-level folder inside it, the plugin now lifts that folder's contents up one
@@ -74,3 +62,32 @@ doesn't fill up the system drive's temp folder, and it is deleted afterwards.
 The install progress notification is now replaced by removing the previous one and adding a new one, on Playnite's UI
 thread, with the downloaded and total size. Progress is also written to extensions.log every 10%, so it can be checked
 there if a notification doesn't refresh.
+
+## Detecting installed games and updates (0.3.0)
+
+Every install writes a small `.lc-game.json` marker into the game folder (game id and archive id). After a library
+update, and on startup, the plugin scans the install folder:
+
+- a folder with a marker is matched to its game by id;
+- a folder without one (installed by hand, or by an older version) is matched by the game's name, and only if it contains an `.exe`.
+
+Matched games are marked installed and get a Play action (the server's launch action if there is one, otherwise a guessed exe).
+There is also **LANCommander > Scan install folder for installed games** in Playnite's main menu. Games found by name are assumed
+to be on the newest archive.
+
+When the newest archive on the server differs from the one in the marker, a notification lists the games. Update one from the
+game's right-click menu (**LANCommander > Update**), or turn on **auto-update** in the settings. An update downloads the newest
+archive and extracts it **over** the existing folder: files that are in the archive are replaced, files the game wrote itself
+(saves, configs) are left alone. Updates run one at a time.
+
+## Server as the source of truth (0.3.0)
+
+On every library update the plugin keeps a snapshot of what the server says (`server-state.json`) and applies it to games
+Playnite already has:
+
+- `Logo.png`, `VideoTrailer.mp4` and `VideoMicrotrailer.mp4` are copied into Extra Metadata (`ExtraMetadata\games\<id>\`) whenever the server's file is new or the target is missing.
+- Title, description, version, release date, developers, publishers, genres and the icon / cover / background are overwritten
+  from the server. Tags and features are only added to, so your own tags are kept. Turn this off with **Server is the source of truth** in the settings.
+
+Videos are added in LANCommander as media of type **Video**. A video whose **Name** contains `micro` is the micro trailer; any
+other video is the trailer. Videos are recognised by their MIME type, and should be mp4.
