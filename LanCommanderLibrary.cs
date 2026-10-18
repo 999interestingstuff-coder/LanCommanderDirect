@@ -23,6 +23,7 @@ namespace LanCommanderDirect
         public LanCommanderLibrary(IPlayniteAPI api) : base(api)
         {
             Properties = new LibraryPluginProperties { HasSettings = true };
+            LcInstallRegistry.Init(Path.Combine(GetPluginUserDataPath(), "installs.json"));
         }
 
         // ---------- config ----------
@@ -335,6 +336,7 @@ namespace LanCommanderDirect
 
         public override void OnApplicationStarted(OnApplicationStartedEventArgs args)
         {
+            LcInstallRegistry.Init(Path.Combine(GetPluginUserDataPath(), "installs.json"));
             RunPostSync();
         }
 
@@ -508,12 +510,11 @@ namespace LanCommanderDirect
             public Game Game;
             public string Dir;
             public GameAction Action;
-            public LcInstallMarker Marker;
         }
 
         /// <summary>
         /// Looks through the install folder for game folders Playnite doesn't know are installed. A folder is
-        /// recognised by its marker file, or (for games installed by hand or by an older version) by its name.
+        /// recognised from the plugin's install records, or (for games installed by hand or on another PC) by its name.
         /// Returns how many games were found; the library is updated in the background.
         /// </summary>
         public int ScanInstalled(LcConfig cfg)
@@ -521,60 +522,66 @@ namespace LanCommanderDirect
             var state = LoadState();
             var games = PlayniteApi.Database.Games.Where(g => g.PluginId == Id).ToList();
 
-            // installed games that predate the marker file: assume they match the newest archive
+            // installed games the plugin has no record of yet: assume they match the newest archive
             foreach (var g in games.Where(x => x.IsInstalled && !string.IsNullOrEmpty(x.InstallDirectory) && !string.IsNullOrEmpty(x.GameId)))
             {
                 try
                 {
                     LcServerEntry e;
-                    if (!Directory.Exists(g.InstallDirectory) || LcInstallMarker.Read(g.InstallDirectory) != null) continue;
+                    if (LcInstallRegistry.Get(g.GameId) != null) continue;
                     if (!state.TryGetValue(g.GameId, out e) || !e.LatestArchiveId.HasValue) continue;
 
-                    LcInstallMarker.Write(g.InstallDirectory, new LcInstallMarker
+                    LcInstallRegistry.Set(new LcInstallRecord
                     {
                         GameId = g.GameId,
+                        InstallDir = g.InstallDirectory,
                         ArchiveId = e.LatestArchiveId,
                         ArchiveVersion = e.LatestArchiveVersion,
                         InstalledOn = DateTime.UtcNow
                     });
                 }
-                catch (Exception ex) { logger.Warn(ex, "LANCommander: could not write a marker for " + g.Name); }
+                catch (Exception ex) { logger.Warn(ex, "LANCommander: could not record the install of " + g.Name); }
             }
 
             var missing = games.Where(g => !g.IsInstalled && !string.IsNullOrEmpty(g.GameId)).ToList();
-            if (missing.Count == 0 || string.IsNullOrWhiteSpace(cfg.InstallRoot) || !Directory.Exists(cfg.InstallRoot))
+            if (missing.Count == 0)
                 return 0;
 
             var byId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var byName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var wanted = new HashSet<string>(missing.Select(g => LcPaths.Sanitize(g.Name)), StringComparer.OrdinalIgnoreCase);
 
-            foreach (var dir in Directory.GetDirectories(cfg.InstallRoot))
+            // games the plugin installed before (for example after Playnite lost the install state): the record says where they are
+            foreach (var g in missing)
             {
-                var folder = Path.GetFileName(dir.TrimEnd('\\'));
-                if (folder.StartsWith(".")) continue;
+                var r = LcInstallRegistry.Get(g.GameId);
+                if (r != null && !string.IsNullOrEmpty(r.InstallDir) && Directory.Exists(r.InstallDir))
+                    byId[g.GameId] = r.InstallDir;
+            }
 
-                var markerDir = dir;
-                var m = LcInstallMarker.Read(dir);
-                if (m == null)
+            // everything else: a folder in the install folder named like the game
+            if (!string.IsNullOrWhiteSpace(cfg.InstallRoot) && Directory.Exists(cfg.InstallRoot))
+            {
+                var wanted = new HashSet<string>(
+                    missing.Where(g => !byId.ContainsKey(g.GameId)).Select(g => LcPaths.Sanitize(g.Name)),
+                    StringComparer.OrdinalIgnoreCase);
+
+                if (wanted.Count > 0)
                 {
-                    foreach (var sub in SafeDirectories(dir))
+                    foreach (var dir in Directory.GetDirectories(cfg.InstallRoot))
                     {
-                        m = LcInstallMarker.Read(sub);
-                        if (m != null) { markerDir = sub; break; }
+                        var folder = Path.GetFileName(dir.TrimEnd('\\'));
+                        if (folder.StartsWith(".") || !wanted.Contains(folder)) continue;
+
+                        // only trust a folder that really contains a program
+                        var candidate = dir;
+                        if (SafeFiles(dir).Length == 0)
+                        {
+                            var subs = SafeDirectories(dir);
+                            if (subs.Length == 1) candidate = subs[0];   // older "Game\Game\" layout
+                        }
+                        if (HasExe(candidate)) byName[folder] = candidate;
                     }
                 }
-
-                if (m != null) { byId[m.GameId] = markerDir; continue; }
-
-                // no marker: only trust a folder that really contains a program
-                var candidate = dir;
-                if (SafeFiles(dir).Length == 0)
-                {
-                    var subs = SafeDirectories(dir);
-                    if (subs.Length == 1) candidate = subs[0];   // older "Game\Game\" layout
-                }
-                if (wanted.Contains(folder) && HasExe(candidate)) byName[folder] = candidate;
             }
 
             var found = new List<DetectedGame>();
@@ -637,17 +644,21 @@ namespace LanCommanderDirect
                         try { d.Action = LcLaunch.BuildPlayAction(d.Dir, info); }
                         catch (Exception e) { logger.Warn(e, "LANCommander: could not work out a play action for " + d.Game.Name); }
 
-                        // a folder found by name is assumed to hold the newest archive; a marker that already exists is kept
-                        if (LcInstallMarker.Read(d.Dir) == null)
+                        // a folder found by name is assumed to hold the newest archive; an existing record is kept
+                        var existing = LcInstallRegistry.Get(d.Game.GameId);
+                        if (existing == null || existing.InstallDir != d.Dir)
                         {
                             var latest = info != null ? info.LatestArchive() : null;
                             LcServerEntry e;
                             state.TryGetValue(d.Game.GameId, out e);
-                            LcInstallMarker.Write(d.Dir, new LcInstallMarker
+                            LcInstallRegistry.Set(new LcInstallRecord
                             {
                                 GameId = d.Game.GameId,
-                                ArchiveId = latest != null ? latest.Id : (e != null ? e.LatestArchiveId : null),
-                                ArchiveVersion = latest != null ? latest.Version : (e != null ? e.LatestArchiveVersion : null),
+                                InstallDir = d.Dir,
+                                ArchiveId = existing != null && existing.ArchiveId.HasValue ? existing.ArchiveId
+                                    : (latest != null ? latest.Id : (e != null ? e.LatestArchiveId : null)),
+                                ArchiveVersion = existing != null && existing.ArchiveId.HasValue ? existing.ArchiveVersion
+                                    : (latest != null ? latest.Version : (e != null ? e.LatestArchiveVersion : null)),
                                 InstalledOn = DateTime.UtcNow
                             });
                         }
@@ -707,7 +718,7 @@ namespace LanCommanderDirect
                 LcServerEntry e;
                 if (!state.TryGetValue(g.GameId, out e) || !e.LatestArchiveId.HasValue) continue;
 
-                var m = LcInstallMarker.Read(g.InstallDirectory);
+                var m = LcInstallRegistry.Get(g.GameId);
                 if (m == null || !m.ArchiveId.HasValue) continue;
 
                 if (m.ArchiveId.Value != e.LatestArchiveId.Value)

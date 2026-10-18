@@ -65,17 +65,17 @@ there if a notification doesn't refresh.
 
 ## Detecting installed games and updates (0.3.0)
 
-Every install writes a small `.lc-game.json` marker into the game folder (game id and archive id). After a library
-update, and on startup, the plugin scans the install folder:
+Nothing is written into the game folders. The plugin keeps its own record of installs (`installs.json` in the plugin's data
+folder: game id, folder and archive id). After a library update, and on startup, it scans the install folder:
 
-- a folder with a marker is matched to its game by id;
-- a folder without one (installed by hand, or by an older version) is matched by the game's name, and only if it contains an `.exe`.
+- a game with a record whose folder still exists is matched by id, even if Playnite lost the install state;
+- any other game is matched by name: a folder in the install folder named like the game (and containing an `.exe`).
 
 Matched games are marked installed and get a Play action (the server's launch action if there is one, otherwise a guessed exe).
 There is also **LANCommander > Scan install folder for installed games** in Playnite's main menu. Games found by name are assumed
 to be on the newest archive.
 
-When the newest archive on the server differs from the one in the marker, a notification lists the games. Update one from the
+When the newest archive on the server differs from the one recorded for the game, a notification lists the games. Update one from the
 game's right-click menu (**LANCommander > Update**), or turn on **auto-update** in the settings. An update downloads the newest
 archive and extracts it **over** the existing folder: files that are in the archive are replaced, files the game wrote itself
 (saves, configs) are left alone. Updates run one at a time.

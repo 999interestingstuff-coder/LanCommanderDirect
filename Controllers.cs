@@ -404,9 +404,10 @@ namespace LanCommanderDirect
                     try { if (Directory.Exists(staging)) Directory.Delete(staging, true); } catch { }
                 }
 
-                LcInstallMarker.Write(installDir, new LcInstallMarker
+                LcInstallRegistry.Set(new LcInstallRecord
                 {
                     GameId = id.ToString(),
+                    InstallDir = installDir,
                     ArchiveId = archive.Id,
                     ArchiveVersion = archive.Version,
                     InstalledOn = DateTime.UtcNow
@@ -667,10 +668,11 @@ namespace LanCommanderDirect
 
                 dir = LcArchiveOps.Flatten(dir);
 
-                // remember which archive this is, so a newer upload can be recognised as an update
-                LcInstallMarker.Write(dir, new LcInstallMarker
+                // remember where this game is and which archive it is, so a newer upload can be recognised as an update
+                LcInstallRegistry.Set(new LcInstallRecord
                 {
                     GameId = id.ToString(),
+                    InstallDir = dir,
                     ArchiveId = archive.Id,
                     ArchiveVersion = archive.Version,
                     InstalledOn = DateTime.UtcNow
@@ -742,6 +744,7 @@ namespace LanCommanderDirect
                     "LANCommander");
             }
 
+            LcInstallRegistry.Remove(Game.GameId);
             InvokeOnUninstalled(new GameUninstalledEventArgs());
         }
     }

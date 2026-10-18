@@ -5,38 +5,94 @@ using Newtonsoft.Json;
 
 namespace LanCommanderDirect
 {
-    /// <summary>
-    /// Small file written into every installed game folder. It lets the plugin recognise a game folder
-    /// again later (scan) and know which archive is installed (update check).
-    /// </summary>
-    public class LcInstallMarker
+    /// <summary>What the plugin knows about one installed game: where it is and which archive it came from.</summary>
+    public class LcInstallRecord
     {
-        public const string FileName = ".lc-game.json";
-
         [JsonProperty("gameId")] public string GameId { get; set; }
+        [JsonProperty("installDir")] public string InstallDir { get; set; }
         [JsonProperty("archiveId")] public Guid? ArchiveId { get; set; }
         [JsonProperty("archiveVersion")] public string ArchiveVersion { get; set; }
         [JsonProperty("installedOn")] public DateTime InstalledOn { get; set; }
+    }
 
-        public static LcInstallMarker Read(string dir)
+    /// <summary>
+    /// Tracks installed games in one file (installs.json) in the plugin's own data folder, so nothing is written
+    /// into the game folders. It is used to recognise a game folder again (scan) and to know which archive is
+    /// installed (update check).
+    /// </summary>
+    static class LcInstallRegistry
+    {
+        static readonly object gate = new object();
+        static string path;
+        static Dictionary<string, LcInstallRecord> cache;
+
+        /// <summary>Sets the file the registry lives in. Safe to call more than once.</summary>
+        public static void Init(string filePath)
         {
-            try
+            lock (gate)
             {
-                var path = Path.Combine(dir, FileName);
-                if (!File.Exists(path)) return null;
-                var m = JsonConvert.DeserializeObject<LcInstallMarker>(File.ReadAllText(path));
-                return m != null && !string.IsNullOrEmpty(m.GameId) ? m : null;
+                if (path == filePath) return;
+                path = filePath;
+                cache = null;
             }
-            catch { return null; }
         }
 
-        public static void Write(string dir, LcInstallMarker marker)
+        static Dictionary<string, LcInstallRecord> Load()
+        {
+            if (cache != null) return cache;
+
+            cache = new Dictionary<string, LcInstallRecord>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (path != null && File.Exists(path))
+                {
+                    var d = JsonConvert.DeserializeObject<Dictionary<string, LcInstallRecord>>(File.ReadAllText(path));
+                    if (d != null)
+                        foreach (var kv in d) cache[kv.Key] = kv.Value;
+                }
+            }
+            catch { /* a damaged file just means games are detected again by name */ }
+            return cache;
+        }
+
+        static void Save()
         {
             try
             {
-                File.WriteAllText(Path.Combine(dir, FileName), JsonConvert.SerializeObject(marker, Formatting.Indented));
+                if (path == null) return;
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllText(path, JsonConvert.SerializeObject(cache, Formatting.Indented));
             }
-            catch { /* a read-only folder must not break an install */ }
+            catch { /* tracking must never break an install */ }
+        }
+
+        public static LcInstallRecord Get(string gameId)
+        {
+            if (string.IsNullOrEmpty(gameId)) return null;
+            lock (gate)
+            {
+                LcInstallRecord r;
+                return Load().TryGetValue(gameId, out r) ? r : null;
+            }
+        }
+
+        public static void Set(LcInstallRecord record)
+        {
+            if (record == null || string.IsNullOrEmpty(record.GameId)) return;
+            lock (gate)
+            {
+                Load()[record.GameId] = record;
+                Save();
+            }
+        }
+
+        public static void Remove(string gameId)
+        {
+            if (string.IsNullOrEmpty(gameId)) return;
+            lock (gate)
+            {
+                if (Load().Remove(gameId)) Save();
+            }
         }
     }
 
