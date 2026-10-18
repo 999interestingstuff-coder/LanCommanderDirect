@@ -350,6 +350,8 @@ namespace LanCommanderDirect
             var cfg = LoadConfigQuiet();
             if (cfg == null) return;
 
+            LogDuplicateDiagnostics();
+
             try { ApplyServerState(cfg); }
             catch (Exception e) { logger.Warn(e, "LANCommander: applying server metadata failed"); }
 
@@ -358,6 +360,34 @@ namespace LanCommanderDirect
 
             try { CheckUpdates(cfg, false); }
             catch (Exception e) { logger.Warn(e, "LANCommander: update check failed"); }
+        }
+
+        /// <summary>
+        /// Writes to extensions.log whenever the same game name appears more than once in the library and at least one
+        /// of the entries comes from this plugin, with the details that tell the entries apart.
+        /// </summary>
+        void LogDuplicateDiagnostics()
+        {
+            try
+            {
+                var all = PlayniteApi.Database.Games.ToList();
+                var ours = all.Where(g => g.PluginId == Id).ToList();
+                logger.Info("LANCommander: the library has " + ours.Count + " game(s) from this plugin (plugin id " + Id + ").");
+
+                var ourNames = new HashSet<string>(ours.Select(g => g.Name ?? ""), StringComparer.OrdinalIgnoreCase);
+                foreach (var group in all.Where(g => ourNames.Contains(g.Name ?? "")).GroupBy(g => (g.Name ?? "").ToLowerInvariant()).Where(x => x.Count() > 1))
+                {
+                    logger.Warn("LANCommander: " + group.Count() + " library entries named \"" + group.First().Name + "\": " +
+                        string.Join(" | ", group.Select(g =>
+                            "id=" + g.Id + " pluginId=" + g.PluginId + " gameId=" + g.GameId +
+                            " source=" + (g.Source != null ? g.Source.Name : "none") +
+                            " installed=" + g.IsInstalled + " dir=" + g.InstallDirectory)));
+                }
+            }
+            catch (Exception e)
+            {
+                logger.Warn(e, "LANCommander: duplicate diagnostics failed");
+            }
         }
 
         // ---------- server is the source of truth: logos, videos and Playnite fields ----------
