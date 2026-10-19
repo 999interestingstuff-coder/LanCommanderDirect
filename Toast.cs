@@ -20,7 +20,8 @@ namespace LanCommanderDirect
         Installed,
         Updated,
         UpdateFailed,
-        InstallFailed
+        InstallFailed,
+        UpdateAvailable
     }
 
     /// <summary>
@@ -124,12 +125,15 @@ namespace LanCommanderDirect
         }
 
         /// <summary>The small header glyph: a download arrow, or a cross for a failure. Drawn as a path so no icon font is needed.</summary>
-        static System.Windows.Shapes.Path HeaderGlyph(bool error)
+        static System.Windows.Shapes.Path HeaderGlyph(LcToastKind kind)
         {
             return new System.Windows.Shapes.Path
             {
-                Data = Geometry.Parse(error ? "M3,3 L11,11 M11,3 L3,11" : "M7,1 L7,9 M3,6 L7,10 L11,6 M1,13 L13,13"),
-                Stroke = new SolidColorBrush(error ? ErrorColor : GreyText),
+                Data = Geometry.Parse(
+                    kind == LcToastKind.UpdateFailed || kind == LcToastKind.InstallFailed ? "M3,3 L11,11 M11,3 L3,11" :
+                    kind == LcToastKind.UpdateAvailable ? "M7,13 L7,5 M3,8 L7,4 L11,8 M1,1 L13,1" :
+                    "M7,1 L7,9 M3,6 L7,10 L11,6 M1,13 L13,13"),
+                Stroke = new SolidColorBrush(kind == LcToastKind.UpdateFailed || kind == LcToastKind.InstallFailed ? ErrorColor : GreyText),
                 StrokeThickness = 1.7,
                 StrokeStartLineCap = PenLineCap.Round,
                 StrokeEndLineCap = PenLineCap.Round,
@@ -160,6 +164,7 @@ namespace LanCommanderDirect
                 {
                     case LcToastKind.Installed: header = "Download Complete"; line = "Your game is ready to play"; break;
                     case LcToastKind.Updated: header = "Update Complete"; line = "Your game is up to date"; break;
+                    case LcToastKind.UpdateAvailable: header = "Update Available"; line = "Update it from the game's menu"; break;
                     case LcToastKind.InstallFailed: header = "Install Failed"; line = string.IsNullOrWhiteSpace(detail) ? "Something went wrong" : detail; break;
                     default: header = "Update Failed"; line = string.IsNullOrWhiteSpace(detail) ? "Something went wrong" : detail; break;
                 }
@@ -168,7 +173,7 @@ namespace LanCommanderDirect
 
                 // header row: glyph + "Download Complete"
                 var headerRow = new StackPanel { Orientation = Orientation.Horizontal };
-                headerRow.Children.Add(HeaderGlyph(error));
+                headerRow.Children.Add(HeaderGlyph(kind));
                 headerRow.Children.Add(new TextBlock
                 {
                     Text = header,

@@ -62,7 +62,7 @@ namespace LanCommanderDirect
         }
 
         /// <summary>makeContent is a factory because a retry after re-login needs a fresh request body.</summary>
-        async Task<HttpResponseMessage> SendAuthedAsync(HttpMethod method, string path, Func<HttpContent> makeContent, HttpCompletionOption option, CancellationToken ct)
+        async Task<HttpResponseMessage> SendAuthedAsync(HttpMethod method, string path, Func<HttpContent> makeContent, HttpCompletionOption option, CancellationToken ct, Action<HttpRequestMessage> configure = null)
         {
             if (token == null)
                 await LoginAsync(ct).ConfigureAwait(false);
@@ -73,6 +73,8 @@ namespace LanCommanderDirect
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 if (makeContent != null)
                     req.Content = makeContent();
+                if (configure != null)
+                    configure(req);
 
                 var resp = await http.SendAsync(req, option, ct).ConfigureAwait(false);
                 if (req.Content != null)
@@ -143,29 +145,72 @@ namespace LanCommanderDirect
             }
         }
 
-        /// <summary>Streams the game's archive (a zip) to disk, reporting (bytesDone, bytesTotal).</summary>
-        public async Task DownloadGameAsync(Guid id, string destPath, long totalHint, Action<long, long> progress, CancellationToken ct)
+        /// <summary>
+        /// Streams the game's archive to partPath, reporting (bytesDone, bytesTotal). If partPath already holds the start of
+        /// the download, it asks the server to continue from there (HTTP Range). A server that ignores the request sends the
+        /// whole file again, and then the download simply starts over. The first progress call reports where it started.
+        /// </summary>
+        public async Task DownloadGameAsync(Guid id, string partPath, long totalHint, Action<long, long> progress, CancellationToken ct)
         {
-            using (var resp = await SendAuthedAsync("/api/Games/" + id + "/Download", HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false))
+            long existing = File.Exists(partPath) ? new FileInfo(partPath).Length : 0;
+            bool startOver = false;
+
+            using (var resp = await SendAuthedAsync(HttpMethod.Get, "/api/Games/" + id + "/Download", null,
+                HttpCompletionOption.ResponseHeadersRead, ct,
+                existing > 0 ? (Action<HttpRequestMessage>)(r => r.Headers.Range = new RangeHeaderValue(existing, null)) : null).ConfigureAwait(false))
             {
-                EnsureOk(resp, "Downloading game");
-
-                long total = resp.Content.Headers.ContentLength ?? totalHint;
-
-                using (var src = await resp.Content.ReadAsStreamAsync().ConfigureAwait(false))
-                using (var dst = File.Create(destPath))
+                if (existing > 0 && (int)resp.StatusCode == 416)
                 {
-                    var buffer = new byte[81920];
-                    long done = 0;
-                    int read;
-                    while ((read = await src.ReadAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(false)) > 0)
+                    // what we have is not usable (for example it is already as long as the file): download again from the start
+                    startOver = true;
+                }
+                else
+                {
+                    EnsureOk(resp, "Downloading game");
+
+                    bool resumed = existing > 0 && resp.StatusCode == HttpStatusCode.PartialContent;
+                    long start = resumed ? existing : 0;
+                    long total;
+                    if (resumed)
                     {
-                        await dst.WriteAsync(buffer, 0, read, ct).ConfigureAwait(false);
-                        done += read;
-                        if (progress != null)
-                            progress(done, total);
+                        var range = resp.Content.Headers.ContentRange;
+                        total = range != null && range.Length.HasValue
+                            ? range.Length.Value
+                            : (resp.Content.Headers.ContentLength ?? (totalHint - existing)) + existing;
+                    }
+                    else
+                    {
+                        total = resp.Content.Headers.ContentLength ?? totalHint;
+                    }
+
+                    if (progress != null)
+                        progress(start, total);
+
+                    using (var src = await resp.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                    using (var dst = new FileStream(partPath, resumed ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.Read))
+                    {
+                        var buffer = new byte[81920];
+                        long done = start;
+                        int read;
+                        while ((read = await src.ReadAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(false)) > 0)
+                        {
+                            await dst.WriteAsync(buffer, 0, read, ct).ConfigureAwait(false);
+                            done += read;
+                            if (progress != null)
+                                progress(done, total);
+                        }
+
+                        // the connection closed early: leave what we have so the next try continues from here
+                        if (total > 0 && done < total)
+                            throw new IOException("The connection closed before the download was finished (" + done + " of " + total + " bytes).");
                     }
                 }
+            }
+
+            if (startOver)
+            {
+                try { File.Delete(partPath); } catch { }
+                await DownloadGameAsync(id, partPath, totalHint, progress, ct).ConfigureAwait(false);
             }
         }
 

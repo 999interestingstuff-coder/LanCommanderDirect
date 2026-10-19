@@ -114,3 +114,19 @@ it is showing, and it slides out to the right when it goes away.
 **Sound:** in the plugin's settings, tick *Play a sound with the popup*, press *Browse...* and pick a sound file (wav, mp3, wma,
 m4a, aac), set the volume with the slider and press *Test* to hear it. *Clear* removes the file (silent). The file is played from
 where it is, so don't move or delete it afterwards.
+
+## Downloads (0.4.0)
+
+- **Resume.** An unfinished download is kept when you cancel the install in Playnite, or when the connection drops. Install
+  (or update) the game again and it continues where it stopped instead of starting over. A dropped connection is also retried
+  automatically a few times. (If the server doesn't support continuing, the download starts from the beginning.) Unfinished
+  downloads of an old version, or older than two weeks, are cleaned up. They live in `.lc-downloads` inside the install folder.
+- **Speed and time left** are shown in the progress notification while downloading.
+- **Queue.** Only one install or update downloads at a time; the others wait ("waiting for another download to finish") and
+  start in order. Cancelling a waiting install removes it from the queue.
+- **Free space check.** Before downloading, the plugin checks that the download and the extracted game fit on the drive(s)
+  and stops with a message telling you how much is needed if they don't.
+- **Update Available popup.** When a game on the server has a newer archive and auto-update is off, you get the same popup
+  (at most three, once per game per Playnite session) telling you to update it from the game's menu.
+- **Failed installs** now show the red popup too (the error dialog only appears when popups are turned off).
+

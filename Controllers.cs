@@ -152,6 +152,13 @@ namespace LanCommanderDirect
             while (value >= 1024 && i < units.Length - 1) { value /= 1024; i++; }
             return value.ToString(i == 0 ? "0" : "0.00") + " " + units[i];
         }
+
+        public static string Duration(double seconds)
+        {
+            if (seconds < 60) return Math.Max(1, (int)seconds) + " sec";
+            if (seconds < 3600) return (int)Math.Round(seconds / 60) + " min";
+            return (int)(seconds / 3600) + " h " + (int)Math.Round((seconds % 3600) / 60) + " min";
+        }
     }
 
     class LcProgress
@@ -171,6 +178,7 @@ namespace LanCommanderDirect
         public double ProgressMaxValue { get; set; }
         public long BytesDone { get; set; }
         public long BytesTotal { get; set; }
+        public double BytesPerSecond { get; set; }
 
         public string Text
         {
@@ -203,6 +211,33 @@ namespace LanCommanderDirect
         public static bool TryBegin(Guid gameId) { lock (running) return running.Add(gameId); }
         public static void End(Guid gameId) { lock (running) running.Remove(gameId); }
 
+        // only one download/extract job runs at a time; the others wait their turn in the order they asked
+        static readonly SemaphoreSlim slot = new SemaphoreSlim(1, 1);
+
+        /// <summary>Waits until no other install or update is running. onWaiting is called once if it has to wait. Throws if cancelled while waiting.</summary>
+        public static void AcquireSlot(CancellationToken ct, Action onWaiting)
+        {
+            if (slot.Wait(0)) return;
+            if (onWaiting != null) onWaiting();
+            slot.Wait(ct);
+        }
+
+        public static void ReleaseSlot() { slot.Release(); }
+
+        /// <summary>Shows "waiting" in the notification panel for a queued job.</summary>
+        public static void ShowQueued(IPlayniteAPI api, string noteId, string gameName)
+        {
+            api.MainView.UIDispatcher.BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    api.Notifications.Remove(noteId);
+                    api.Notifications.Add(new NotificationMessage(noteId, gameName + ": waiting for another download to finish...", NotificationType.Info));
+                }
+                catch (Exception e) { logger.Warn(e, "LANCommander: could not show the queue notification"); }
+            }));
+        }
+
         public static LcProgress MakeProgress(IPlayniteAPI api, string noteId, CancellationToken ct)
         {
             int lastBucket = -1;
@@ -211,6 +246,10 @@ namespace LanCommanderDirect
                 var percent = Math.Round(p.CurrentProgressValue);
                 var message = (p.Text ?? "").TrimEnd('.') + " " + percent + "%" +
                               (p.BytesTotal > 0 ? " (" + LcFormat.Bytes(p.BytesDone) + " of " + LcFormat.Bytes(p.BytesTotal) + ")" : "");
+
+                if (p.BytesPerSecond > 0 && p.BytesTotal > p.BytesDone)
+                    message += " - " + LcFormat.Bytes((long)p.BytesPerSecond) + "/s, about " +
+                               LcFormat.Duration((p.BytesTotal - p.BytesDone) / p.BytesPerSecond) + " left";
 
                 // also write every 10% to extensions.log, so progress can be checked even if the notification doesn't refresh
                 var bucket = (int)(percent / 10);
@@ -252,24 +291,146 @@ namespace LanCommanderDirect
             return tmpDir;
         }
 
+        /// <summary>Where the unfinished download of this archive is kept. It survives a cancel or a lost connection so the next try can continue.</summary>
+        public static string PartPath(string file, LcArchive archive)
+        {
+            return file + "." + archive.Id.ToString("N") + ".part";
+        }
+
+        /// <summary>Removes unfinished downloads of other versions of this archive, and any that have been lying around for two weeks.</summary>
+        static void CleanOldParts(string file, string keep)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(file);
+                foreach (var f in Directory.GetFiles(dir, "*.part"))
+                {
+                    var stale = (DateTime.UtcNow - File.GetLastWriteTimeUtc(f)).TotalDays > 14;
+                    var sameGameOtherVersion = Path.GetFileName(f).StartsWith(Path.GetFileName(file) + ".", StringComparison.OrdinalIgnoreCase) &&
+                                               !string.Equals(f, keep, StringComparison.OrdinalIgnoreCase);
+                    if (stale || sameGameOtherVersion)
+                        try { File.Delete(f); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Stops early, with a clear message, if the drives can't hold the download and the extracted game. Only checks
+        /// what it can read; network paths are skipped. needsStaging = an update, which extracts into the download folder first.
+        /// </summary>
+        public static void CheckSpace(LcConfig cfg, string installDir, LcArchive archive, bool needsStaging, string file)
+        {
+            try
+            {
+                long compressed = archive.CompressedSize;
+                long extracted = archive.UncompressedSize > 0 ? archive.UncompressedSize : compressed * 2;
+                if (compressed <= 0 && extracted <= 0) return;
+
+                long already = 0;
+                var part = PartPath(file, archive);
+                if (File.Exists(part)) already = new FileInfo(part).Length;
+
+                long downloadNeed = Math.Max(0, compressed - already) + (needsStaging ? extracted : 0);
+                long installNeed = extracted;
+
+                var downloadRoot = Path.GetPathRoot(Path.GetFullPath(Path.GetDirectoryName(file)));
+                var installRoot = Path.GetPathRoot(Path.GetFullPath(installDir));
+
+                if (string.Equals(downloadRoot, installRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    Require(downloadRoot, downloadNeed + installNeed, "the game");
+                }
+                else
+                {
+                    Require(downloadRoot, downloadNeed, "the download");
+                    Require(installRoot, installNeed, "the game");
+                }
+            }
+            catch (InvalidOperationException) { throw; }
+            catch (Exception e)
+            {
+                logger.Warn(e, "LANCommander: could not check free disk space");
+            }
+        }
+
+        static void Require(string root, long bytes, string what)
+        {
+            if (string.IsNullOrEmpty(root) || root.StartsWith("\\\\") || bytes <= 0) return;
+
+            var drive = new DriveInfo(root);
+            if (!drive.IsReady) return;
+
+            var needed = (long)(bytes * 1.05) + 100L * 1024 * 1024;
+            if (drive.AvailableFreeSpace < needed)
+                throw new InvalidOperationException("Not enough free space on " + root + " for " + what + ": about " +
+                    LcFormat.Bytes(needed) + " needed, " + LcFormat.Bytes(drive.AvailableFreeSpace) + " free.");
+        }
+
+        /// <summary>
+        /// Downloads the archive to 'file'. An unfinished earlier download is continued, and a dropped connection is retried
+        /// a few times, continuing where it stopped. Cancelling keeps the unfinished part for the next try.
+        /// </summary>
         public static void Download(LcClient client, Guid id, LcArchive archive, string file, string gameName, LcProgress p, CancellationToken ct)
         {
-            p.Text = "Downloading " + gameName + "...";
+            var part = PartPath(file, archive);
+            CleanOldParts(file, part);
+
+            bool resuming = File.Exists(part) && new FileInfo(part).Length > 0;
+            p.Text = (resuming ? "Resuming download of " : "Downloading ") + gameName + "...";
             p.ProgressMaxValue = 100;
             p.CurrentProgressValue = 0;
 
             var hint = archive.CompressedSize;
-            Task.Run(() => client.DownloadGameAsync(id, file, hint, (done, total) =>
-            {
-                p.BytesDone = done;
-                p.BytesTotal = total;
-                if (total > 0) p.CurrentProgressValue = done * 100.0 / total;
-            }, ct)).GetAwaiter().GetResult();
+            const int attempts = 4;
 
-            var size = new FileInfo(file).Length;
-            logger.Info("LANCommander: downloaded " + size + " bytes to " + file);
+            for (int attempt = 1; ; attempt++)
+            {
+                var timer = System.Diagnostics.Stopwatch.StartNew();
+                long baseline = -1;
+
+                try
+                {
+                    Task.Run(() => client.DownloadGameAsync(id, part, hint, (done, total) =>
+                    {
+                        if (baseline < 0) baseline = done;     // first call: where this try started
+                        p.BytesDone = done;
+                        p.BytesTotal = total;
+
+                        var seconds = timer.Elapsed.TotalSeconds;
+                        if (seconds > 3 && done > baseline) p.BytesPerSecond = (done - baseline) / seconds;
+
+                        if (total > 0) p.CurrentProgressValue = done * 100.0 / total;
+                    }, ct)).GetAwaiter().GetResult();
+                    break;
+                }
+                catch (Exception e)
+                {
+                    if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+
+                    var network = e is IOException || e is System.Net.Http.HttpRequestException || e is System.Net.WebException;
+                    if (!network || attempt >= attempts) throw;
+
+                    logger.Warn(e, "LANCommander: download interrupted, retrying (" + attempt + "/" + (attempts - 1) + ")");
+                    p.BytesPerSecond = 0;
+                    p.Text = "Connection lost, resuming " + gameName + " (try " + (attempt + 1) + " of " + attempts + ")...";
+                    if (ct.WaitHandle.WaitOne(TimeSpan.FromSeconds(2 * attempt)))
+                        throw new OperationCanceledException(ct);
+                    p.Text = "Downloading " + gameName + "...";
+                }
+            }
+
+            var size = new FileInfo(part).Length;
+            logger.Info("LANCommander: downloaded " + size + " bytes to " + part);
             if (size < 4096)
-                throw new InvalidOperationException("Download is only " + size + " bytes, not a game archive: " + File.ReadAllText(file));
+            {
+                var text = File.ReadAllText(part);
+                try { File.Delete(part); } catch { }
+                throw new InvalidOperationException("Download is only " + size + " bytes, not a game archive: " + text);
+            }
+
+            if (File.Exists(file)) File.Delete(file);
+            File.Move(part, file);
         }
 
         public static void Extract(LcConfig cfg, string file, string destDir, string gameName, LcProgress p, CancellationToken ct)
@@ -278,6 +439,7 @@ namespace LanCommanderDirect
 
             p.BytesDone = 0;
             p.BytesTotal = 0;
+            p.BytesPerSecond = 0;
             p.Text = "Extracting " + gameName + "...";
             p.CurrentProgressValue = 0;
 
@@ -384,6 +546,7 @@ namespace LanCommanderDirect
 
                 try
                 {
+                    CheckSpace(cfg, installDir, archive, true, file);
                     if (Directory.Exists(staging)) Directory.Delete(staging, true);
 
                     Download(client, id, archive, file, game.Name, p, ct);
@@ -579,10 +742,18 @@ namespace LanCommanderDirect
                 LcGame info = null;
                 Exception error = null;
                 bool cancelled = false;
+                bool gotSlot = false;
 
-                try { installDir = DoInstall(cfg, progress, out info); }
+                try
+                {
+                    // one download at a time: later installs and updates wait their turn
+                    LcJobs.AcquireSlot(cts.Token, () => LcJobs.ShowQueued(api, noteId, gameName));
+                    gotSlot = true;
+                    installDir = DoInstall(cfg, progress, out info);
+                }
                 catch (OperationCanceledException) { cancelled = true; }
                 catch (Exception e) { error = e; }
+                finally { if (gotSlot) LcJobs.ReleaseSlot(); }
 
                 api.MainView.UIDispatcher.Invoke(() =>
                 {
@@ -652,6 +823,7 @@ namespace LanCommanderDirect
                 bool createdDir = false;
                 try
                 {
+                    LcArchiveOps.CheckSpace(cfg, dir, archive, false, file);
                     LcArchiveOps.Download(client, id, archive, file, Game.Name, p, ct);
 
                     createdDir = !Directory.Exists(dir);

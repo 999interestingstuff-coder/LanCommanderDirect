@@ -75,8 +75,15 @@ namespace LanCommanderDirect
                 LcGame info = null;
                 Exception error = null;
 
-                try { info = LcArchiveOps.Update(cfg, game, progress); }
+                bool gotSlot = false;
+                try
+                {
+                    LcJobs.AcquireSlot(CancellationToken.None, () => LcJobs.ShowQueued(api, noteId, name));
+                    gotSlot = true;
+                    info = LcArchiveOps.Update(cfg, game, progress);
+                }
                 catch (Exception e) { error = e; }
+                finally { if (gotSlot) LcJobs.ReleaseSlot(); }
 
                 try
                 {

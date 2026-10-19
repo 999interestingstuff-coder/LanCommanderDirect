@@ -757,6 +757,8 @@ namespace LanCommanderDirect
             return outdated;
         }
 
+        readonly HashSet<Guid> popupAnnounced = new HashSet<Guid>();
+
         /// <summary>Tells the user which games have updates and, if auto-update is on, starts them. Returns the games found.</summary>
         public List<Game> CheckUpdates(LcConfig cfg, bool interactive)
         {
@@ -785,6 +787,13 @@ namespace LanCommanderDirect
                     "LANCommander: updates available for " + outdated.Count + " game(s): " + names +
                     ". Right-click the game > LANCommander > Update.",
                     NotificationType.Info));
+
+                // one popup per game (at most three) the first time this session a game is found outdated
+                if (!interactive && cfg.PopupNotifications)
+                {
+                    foreach (var g in outdated.Where(x => popupAnnounced.Add(x.Id)).Take(3))
+                        LcToast.Show(PlayniteApi, g, LcToastKind.UpdateAvailable, null, cfg);
+                }
             }
             return outdated;
         }
