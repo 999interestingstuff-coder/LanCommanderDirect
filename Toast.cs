@@ -23,9 +23,7 @@ namespace LanCommanderDirect
         InstallFailed,
         UpdateAvailable,
         ServerOffline,
-        ServerOnline,
-        VerifyDone,
-        VerifyFailed
+        ServerOnline
     }
 
     /// <summary>
@@ -92,7 +90,7 @@ namespace LanCommanderDirect
         static bool IsFailure(LcToastKind kind)
         {
             return kind == LcToastKind.UpdateFailed || kind == LcToastKind.InstallFailed ||
-                   kind == LcToastKind.ServerOffline || kind == LcToastKind.VerifyFailed;
+                   kind == LcToastKind.ServerOffline;
         }
 
         /// <summary>Each kind of popup has its own sound: done (default), failed, update available.</summary>
@@ -150,7 +148,7 @@ namespace LanCommanderDirect
                 Data = Geometry.Parse(
                     IsFailure(kind) ? "M3,3 L11,11 M11,3 L3,11" :
                     kind == LcToastKind.UpdateAvailable ? "M7,13 L7,5 M3,8 L7,4 L11,8 M1,1 L13,1" :
-                    kind == LcToastKind.VerifyDone || kind == LcToastKind.ServerOnline ? "M2,7 L6,11 L12,3" :
+                    kind == LcToastKind.ServerOnline ? "M2,7 L6,11 L12,3" :
                     "M7,1 L7,9 M3,6 L7,10 L11,6 M1,13 L13,13"),
                 Stroke = new SolidColorBrush(IsFailure(kind) ? ErrorColor : GreyText),
                 StrokeThickness = 1.7,
@@ -185,8 +183,6 @@ namespace LanCommanderDirect
                     case LcToastKind.Updated: header = "Update Complete"; line = "Your game is up to date"; break;
                     case LcToastKind.ServerOffline: header = "Server Unreachable"; line = string.IsNullOrWhiteSpace(detail) ? "Installed games still work" : detail; break;
                     case LcToastKind.ServerOnline: header = "Server Connected"; line = "LANCommander is reachable again"; break;
-                    case LcToastKind.VerifyDone: header = "Verification Complete"; line = string.IsNullOrWhiteSpace(detail) ? "All files are intact" : detail; break;
-                    case LcToastKind.VerifyFailed: header = "Verification Failed"; line = string.IsNullOrWhiteSpace(detail) ? "Something went wrong" : detail; break;
                     case LcToastKind.UpdateAvailable: header = "Update Available"; line = "Update it from the game's menu"; break;
                     case LcToastKind.InstallFailed: header = "Install Failed"; line = string.IsNullOrWhiteSpace(detail) ? "Something went wrong" : detail; break;
                     default: header = "Update Failed"; line = string.IsNullOrWhiteSpace(detail) ? "Something went wrong" : detail; break;

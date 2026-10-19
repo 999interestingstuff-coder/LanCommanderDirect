@@ -319,7 +319,7 @@ namespace LanCommanderDirect
         /// Stops early, with a clear message, if the drives can't hold the download and the extracted game. Only checks
         /// what it can read; network paths are skipped. needsStaging = an update, which extracts into the download folder first.
         /// </summary>
-        public static void CheckSpace(LcConfig cfg, string installDir, LcArchive archive, bool needsStaging, string file, bool extractsToInstall = true)
+        public static void CheckSpace(LcConfig cfg, string installDir, LcArchive archive, bool needsStaging, string file)
         {
             try
             {
@@ -332,7 +332,7 @@ namespace LanCommanderDirect
                 if (File.Exists(part)) already = new FileInfo(part).Length;
 
                 long downloadNeed = Math.Max(0, compressed - already) + (needsStaging ? extracted : 0);
-                long installNeed = extractsToInstall ? extracted : 0;
+                long installNeed = extracted;
 
                 var downloadRoot = Path.GetPathRoot(Path.GetFullPath(Path.GetDirectoryName(file)));
                 var installRoot = Path.GetPathRoot(Path.GetFullPath(installDir));

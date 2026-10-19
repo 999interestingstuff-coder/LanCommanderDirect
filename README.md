@@ -130,20 +130,14 @@ where it is, so don't move or delete it afterwards.
   (at most three, once per game per Playnite session) telling you to update it from the game's menu.
 - **Failed installs** now show the red popup too (the error dialog only appears when popups are turned off).
 
-## Verify / repair, server offline, sounds (0.5.0)
+## Server offline and sounds (0.5.1)
 
-- **Verify / repair files.** Right-click an installed game > LANCommander > *Verify / repair files*. It downloads the archive
-  (resumable, queued like an install), compares every file in it with your installed copy, and shows what is missing or
-  different. You then choose what to restore: missing and changed files, or only the missing ones. Files that are not in the
-  archive (saves, settings the game created) are never touched. *Quick* compares file sizes; *Full* also compares the contents
-  (slower). It only works with zip archives, and if a newer archive is on the server it asks you to update first (the check
-  compares against the newest version).
 - **Server offline.** If the server can't be reached (switched off, no network, no answer in time), you get one red popup
   and one notification in the panel instead of a pile of errors. Installed games still launch, play sessions are skipped
   quietly (a short wait, so a switched-off server doesn't hold your game back), and nothing disappears from your library.
   When the server answers again you get a "Server Connected" popup. *Main menu > LANCommander > Check server connection* tests
   it on demand. A wrong password is not "offline" (the server did answer), and nothing is checked at all until a server URL,
   username and password have been entered.
-- **Different sounds.** Three sounds in the settings: finished (install, update, verification, server back), failed
-  (failed install/update/verification, server unreachable), and update available. An empty one is silent; the volume is shared.
+- **Different sounds.** Three sounds in the settings: finished (install, update, server back), failed
+  (failed install/update, server unreachable), and update available. An empty one is silent; the volume is shared.
 

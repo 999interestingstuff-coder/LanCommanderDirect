@@ -1038,18 +1038,6 @@ namespace LanCommanderDirect
                 MenuSection = "LANCommander",
                 Action = a => LcUpdater.Enqueue(PlayniteApi, this, games)
             };
-            yield return new GameMenuItem
-            {
-                Description = "Verify / repair files (quick: checks file sizes)",
-                MenuSection = "LANCommander",
-                Action = a => LcVerify.Start(PlayniteApi, this, games, false)
-            };
-            yield return new GameMenuItem
-            {
-                Description = "Verify / repair files (full: compares file contents, slower)",
-                MenuSection = "LANCommander",
-                Action = a => LcVerify.Start(PlayniteApi, this, games, true)
-            };
         }
 
         public override IEnumerable<MainMenuItem> GetMainMenuItems(GetMainMenuItemsArgs args)

@@ -36,10 +36,10 @@ namespace LanCommanderDirect
         /// <summary>Play a sound when the popup appears (only if a sound file is chosen).</summary>
         public bool PopupSound { get; set; } = true;
 
-        /// <summary>Sound file (wav, mp3, wma...) for a finished install/update/verify. Empty = silent.</summary>
+        /// <summary>Sound file (wav, mp3, wma...) for a finished install/update. Empty = silent.</summary>
         public string PopupSoundPath { get; set; } = "";
 
-        /// <summary>Sound for failures (failed install/update/verify, server unreachable). Empty = silent.</summary>
+        /// <summary>Sound for failures (failed install/update, server unreachable). Empty = silent.</summary>
         public string PopupSoundFailPath { get; set; } = "";
 
         /// <summary>Sound for "Update Available". Empty = silent.</summary>

@@ -189,7 +189,7 @@ namespace LanCommanderDirect
             panel.Children.Add(Check("PopupNotifications", "Show a popup when a game has been installed or updated"));
             panel.Children.Add(Check("PopupOverGames", "Show that popup over everything, including running borderless/windowed games (off = only inside Playnite's window)"));
             panel.Children.Add(Check("PopupSound", "Play a sound with the popup (choose the file below; no file = silent)"));
-            AddSoundRow(panel, settings, api, "Sound when an install, update or verification finishes (wav, mp3, wma...)", "PopupSoundPath", () => settings.PopupSoundPath);
+            AddSoundRow(panel, settings, api, "Sound when an install or update finishes (wav, mp3, wma...)", "PopupSoundPath", () => settings.PopupSoundPath);
             AddSoundRow(panel, settings, api, "Sound when something fails (failed install/update, server unreachable)", "PopupSoundFailPath", () => settings.PopupSoundFailPath);
             AddSoundRow(panel, settings, api, "Sound when an update is available", "PopupSoundAvailablePath", () => settings.PopupSoundAvailablePath);
 
