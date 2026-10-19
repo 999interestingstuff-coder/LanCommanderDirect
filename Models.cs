@@ -33,6 +33,15 @@ namespace LanCommanderDirect
         /// <summary>Show the popup over everything, including running borderless/windowed games. Off = only inside Playnite's window.</summary>
         public bool PopupOverGames { get; set; } = true;
 
+        /// <summary>Play a sound when the popup appears (only if a sound file is chosen).</summary>
+        public bool PopupSound { get; set; } = true;
+
+        /// <summary>Sound file (wav, mp3, wma...) played with the popup. Empty = silent.</summary>
+        public string PopupSoundPath { get; set; } = "";
+
+        /// <summary>Sound volume, 0-100.</summary>
+        public int PopupSoundVolume { get; set; } = 70;
+
         /// <summary>Download trailer / micro trailer videos from the server into Extra Metadata.</summary>
         public bool SyncVideos { get; set; } = true;
     }

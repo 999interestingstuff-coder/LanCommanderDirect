@@ -28,6 +28,9 @@ namespace LanCommanderDirect
         bool syncVideos = true;
         bool popupNotifications = true;
         bool popupOverGames = true;
+        bool popupSound = true;
+        string popupSoundPath = "";
+        int popupSoundVolume = 70;
 
         public string ServerUrl { get { return serverUrl; } set { SetValue(ref serverUrl, value); } }
         public string Username { get { return username; } set { SetValue(ref username, value); } }
@@ -40,6 +43,9 @@ namespace LanCommanderDirect
         public bool SyncVideos { get { return syncVideos; } set { SetValue(ref syncVideos, value); } }
         public bool PopupNotifications { get { return popupNotifications; } set { SetValue(ref popupNotifications, value); } }
         public bool PopupOverGames { get { return popupOverGames; } set { SetValue(ref popupOverGames, value); } }
+        public bool PopupSound { get { return popupSound; } set { SetValue(ref popupSound, value); } }
+        public string PopupSoundPath { get { return popupSoundPath; } set { SetValue(ref popupSoundPath, value); } }
+        public int PopupSoundVolume { get { return popupSoundVolume; } set { SetValue(ref popupSoundVolume, value); } }
 
         public LcSettings(LanCommanderLibrary plugin)
         {
@@ -60,6 +66,9 @@ namespace LanCommanderDirect
             SyncVideos = c.SyncVideos;
             PopupNotifications = c.PopupNotifications;
             PopupOverGames = c.PopupOverGames;
+            PopupSound = c.PopupSound;
+            PopupSoundPath = c.PopupSoundPath ?? "";
+            PopupSoundVolume = Math.Max(0, Math.Min(100, c.PopupSoundVolume));
         }
 
         public LcConfig ToConfig()
@@ -76,7 +85,10 @@ namespace LanCommanderDirect
                 SyncMetadata = SyncMetadata,
                 SyncVideos = SyncVideos,
                 PopupNotifications = PopupNotifications,
-                PopupOverGames = PopupOverGames
+                PopupOverGames = PopupOverGames,
+                PopupSound = PopupSound,
+                PopupSoundPath = (PopupSoundPath ?? "").Trim(),
+                PopupSoundVolume = PopupSoundVolume
             };
         }
 
@@ -168,6 +180,33 @@ namespace LanCommanderDirect
 
             panel.Children.Add(Check("PopupNotifications", "Show a popup when a game has been installed or updated"));
             panel.Children.Add(Check("PopupOverGames", "Show that popup over everything, including running borderless/windowed games (off = only inside Playnite's window)"));
+            panel.Children.Add(Check("PopupSound", "Play a sound with the popup (choose the file below; no file = silent)"));
+            panel.Children.Add(Label("Popup sound file (wav, mp3, wma...)"));
+            var soundRow = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
+            var soundTest = new Button { Content = "Test", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(12, 4, 12, 4) };
+            var soundClear = new Button { Content = "Clear", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(12, 4, 12, 4) };
+            var soundBrowse = new Button { Content = "Browse...", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(12, 4, 12, 4) };
+            DockPanel.SetDock(soundTest, Dock.Right);
+            DockPanel.SetDock(soundClear, Dock.Right);
+            DockPanel.SetDock(soundBrowse, Dock.Right);
+            soundBrowse.Click += (s, e) =>
+            {
+                var file = api.Dialogs.SelectFile("Audio files|*.wav;*.mp3;*.wma;*.m4a;*.aac|All files|*.*");
+                if (!string.IsNullOrEmpty(file)) settings.PopupSoundPath = file;
+            };
+            soundClear.Click += (s, e) => { settings.PopupSoundPath = ""; };
+            soundTest.Click += (s, e) => LcToast.PlaySound(settings.PopupSoundPath, settings.PopupSoundVolume);
+            soundRow.Children.Add(soundTest);
+            soundRow.Children.Add(soundClear);
+            soundRow.Children.Add(soundBrowse);
+            soundRow.Children.Add(Box("PopupSoundPath", 0));
+            panel.Children.Add(soundRow);
+
+            panel.Children.Add(Label("Popup sound volume"));
+            var volume = new Slider { Minimum = 0, Maximum = 100, TickFrequency = 1, IsSnapToTickEnabled = true, Margin = new Thickness(0, 0, 0, 12) };
+            volume.SetBinding(Slider.ValueProperty, new Binding("PopupSoundVolume") { Mode = BindingMode.TwoWay });
+            panel.Children.Add(volume);
+
             panel.Children.Add(Check("AutoUpdate", "Update games automatically when a newer archive is uploaded to the server (off = update from the game's right-click menu)"));
             panel.Children.Add(Check("SyncMetadata", "Server is the source of truth: overwrite description, developers, genres, images... from LANCommander on every library update"));
             panel.Children.Add(Check("SyncVideos", "Download trailer / micro trailer videos from the server into Extra Metadata (a video named \"micro\" is the micro trailer)"));

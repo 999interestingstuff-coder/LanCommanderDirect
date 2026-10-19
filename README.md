@@ -92,7 +92,7 @@ Playnite already has:
 Videos are added in LANCommander as media of type **Video**. A video whose **Name** contains `micro` is the micro trailer; any
 other video is the trailer. Videos are recognised by their MIME type, and should be mp4.
 
-## Popups (0.3.5)
+## Popups (0.3.6)
 
 When a game has been installed or updated, a popup styled after Steam's "Download Complete" toast slides in at the bottom-right
 (in addition to the entry in Playnite's notification panel): a dark panel, the game's icon on the left, a small grey header
@@ -107,3 +107,10 @@ focus, ignores mouse and controller input and is not listed in Alt+Tab.
   and Fullscreen mode) instead. Nothing is shown while Playnite is hidden or minimized.
 
 Turn popups off completely with *Show a popup when a game has been installed or updated*. No Windows notifications are used.
+
+The popup also has a shine that sweeps across the card as it appears, a thin progress line along the bottom that shrinks while
+it is showing, and it slides out to the right when it goes away.
+
+**Sound:** in the plugin's settings, tick *Play a sound with the popup*, press *Browse...* and pick a sound file (wav, mp3, wma,
+m4a, aac), set the volume with the slider and press *Test* to hear it. *Clear* removes the file (silent). The file is played from
+where it is, so don't move or delete it afterwards.

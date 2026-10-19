@@ -9,6 +9,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using Rectangle = System.Windows.Shapes.Rectangle;
 using Playnite.SDK;
 using Playnite.SDK.Models;
 
@@ -40,6 +41,7 @@ namespace LanCommanderDirect
     {
         static readonly ILogger logger = LogManager.GetLogger();
         static readonly List<Window> open = new List<Window>();
+        static readonly List<MediaPlayer> players = new List<MediaPlayer>();
 
         const int GWL_EXSTYLE = -20;
         const int WS_EX_TRANSPARENT = 0x00000020;   // clicks go straight through
@@ -55,12 +57,38 @@ namespace LanCommanderDirect
         static readonly Color GreyText = Color.FromRgb(0x8F, 0x98, 0xA0);
         static readonly Color ErrorColor = Color.FromRgb(0xE0, 0x6C, 0x6C);
 
-        /// <summary>Shows a popup for a game. detail is only used for UpdateFailed (the error text).</summary>
-        public static void Show(IPlayniteAPI api, Game game, LcToastKind kind, string detail, bool overGames)
+        /// <summary>Plays a sound file at the given volume (0-100). Must be called on the UI thread. Silent if the file is missing.</summary>
+        public static void PlaySound(string path, int volume)
         {
             try
             {
-                api.MainView.UIDispatcher.BeginInvoke(new Action(() => ShowCore(api, game, kind, detail, overGames)));
+                if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
+
+                var player = new MediaPlayer();
+                player.Volume = Math.Max(0, Math.Min(100, volume)) / 100.0;
+                EventHandler release = (s, e) =>
+                {
+                    try { player.Close(); } catch { }
+                    players.Remove(player);
+                };
+                player.MediaEnded += release;
+                player.MediaFailed += (s, e) => release(s, EventArgs.Empty);
+                players.Add(player);
+                player.Open(new Uri(path, UriKind.Absolute));
+                player.Play();
+            }
+            catch (Exception e)
+            {
+                logger.Warn(e, "LANCommander: could not play the popup sound");
+            }
+        }
+
+        /// <summary>Shows a popup for a game. detail is only used for UpdateFailed (the error text).</summary>
+        public static void Show(IPlayniteAPI api, Game game, LcToastKind kind, string detail, LcConfig cfg)
+        {
+            try
+            {
+                api.MainView.UIDispatcher.BeginInvoke(new Action(() => ShowCore(api, game, kind, detail, cfg)));
             }
             catch (Exception e)
             {
@@ -112,10 +140,11 @@ namespace LanCommanderDirect
             };
         }
 
-        static void ShowCore(IPlayniteAPI api, Game game, LcToastKind kind, string detail, bool overGames)
+        static void ShowCore(IPlayniteAPI api, Game game, LcToastKind kind, string detail, LcConfig cfg)
         {
             try
             {
+                bool overGames = cfg.PopupOverGames;
                 Window owner = null;
                 if (!overGames)
                 {
@@ -185,14 +214,51 @@ namespace LanCommanderDirect
                 }
                 panel.Children.Add(texts);
 
+                panel.Margin = new Thickness(14, 12, 18, 15);
+
+                var accent = error ? ErrorColor : Color.FromRgb(0x1A, 0x9F, 0xFF);
+
+                // thin progress line along the bottom edge; shrinks while the popup is showing
+                var progressScale = new ScaleTransform(1, 1);
+                var progressLine = new Rectangle
+                {
+                    Height = 3,
+                    VerticalAlignment = VerticalAlignment.Bottom,
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    Fill = new SolidColorBrush(accent),
+                    Opacity = 0.9,
+                    RenderTransformOrigin = new Point(0, 0.5),
+                    RenderTransform = progressScale
+                };
+
+                // soft diagonal shine that sweeps across the card once when it appears
+                var shineMove = new TranslateTransform(-160, 0);
+                var shineBrush = new LinearGradientBrush { StartPoint = new Point(0, 0.5), EndPoint = new Point(1, 0.5) };
+                shineBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 0));
+                shineBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0x3A, 0xFF, 0xFF, 0xFF), 0.5));
+                shineBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 1));
+                var shine = new Rectangle
+                {
+                    Width = 110,
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                    VerticalAlignment = VerticalAlignment.Stretch,
+                    Fill = shineBrush,
+                    IsHitTestVisible = false,
+                    RenderTransform = new TransformGroup { Children = { new SkewTransform(-20, 0), shineMove } }
+                };
+
+                var inner = new Grid { ClipToBounds = true };
+                inner.Children.Add(panel);
+                inner.Children.Add(shine);
+                inner.Children.Add(progressLine);
+
                 var border = new Border
                 {
                     Background = new SolidColorBrush(PanelColor),
                     BorderBrush = new SolidColorBrush(EdgeColor),
                     BorderThickness = new Thickness(1),
                     CornerRadius = new CornerRadius(3),
-                    Padding = new Thickness(14, 12, 18, 12),
-                    Child = panel
+                    Child = inner
                 };
 
                 var win = new Window
@@ -264,16 +330,40 @@ namespace LanCommanderDirect
                 win.BeginAnimation(Window.LeftProperty, slide);
                 win.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(250)));
 
-                var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(error ? 8 : 6) };
+                // sound
+                if (cfg.PopupSound) PlaySound(cfg.PopupSoundPath, cfg.PopupSoundVolume);
+
+                double hold = error ? 8 : 6;
+
+                // shine sweeps across the card once, just after it has slid in
+                shineMove.BeginAnimation(TranslateTransform.XProperty,
+                    new DoubleAnimation(-160, 400, TimeSpan.FromMilliseconds(750))
+                    {
+                        BeginTime = TimeSpan.FromMilliseconds(250),
+                        EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseInOut }
+                    });
+
+                // progress line shrinks over the whole time the popup is showing
+                progressScale.BeginAnimation(ScaleTransform.ScaleXProperty,
+                    new DoubleAnimation(1, 0, TimeSpan.FromSeconds(hold)));
+
+                var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(hold) };
                 timer.Tick += (s, e) =>
                 {
                     timer.Stop();
-                    var fade = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(400));
+
+                    // slide out to the right while fading out
+                    var slideOut = new DoubleAnimation(finalLeft, finalLeft + 60, TimeSpan.FromMilliseconds(350))
+                    {
+                        EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+                    };
+                    var fade = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(350));
                     fade.Completed += (s2, e2) =>
                     {
                         open.Remove(win);
                         try { win.Close(); } catch { }
                     };
+                    win.BeginAnimation(Window.LeftProperty, slideOut);
                     win.BeginAnimation(UIElement.OpacityProperty, fade);
                 };
                 timer.Start();
