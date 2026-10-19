@@ -21,7 +21,11 @@ namespace LanCommanderDirect
         Updated,
         UpdateFailed,
         InstallFailed,
-        UpdateAvailable
+        UpdateAvailable,
+        ServerOffline,
+        ServerOnline,
+        VerifyDone,
+        VerifyFailed
     }
 
     /// <summary>
@@ -85,6 +89,20 @@ namespace LanCommanderDirect
             }
         }
 
+        static bool IsFailure(LcToastKind kind)
+        {
+            return kind == LcToastKind.UpdateFailed || kind == LcToastKind.InstallFailed ||
+                   kind == LcToastKind.ServerOffline || kind == LcToastKind.VerifyFailed;
+        }
+
+        /// <summary>Each kind of popup has its own sound: done (default), failed, update available.</summary>
+        static string SoundFor(LcToastKind kind, LcConfig cfg)
+        {
+            if (kind == LcToastKind.UpdateAvailable) return cfg.PopupSoundAvailablePath;
+            if (IsFailure(kind)) return cfg.PopupSoundFailPath;
+            return cfg.PopupSoundPath;
+        }
+
         /// <summary>Shows a popup for a game. detail is only used for the failed kinds (the error text).</summary>
         public static void Show(IPlayniteAPI api, Game game, LcToastKind kind, string detail, LcConfig cfg)
         {
@@ -130,10 +148,11 @@ namespace LanCommanderDirect
             return new System.Windows.Shapes.Path
             {
                 Data = Geometry.Parse(
-                    kind == LcToastKind.UpdateFailed || kind == LcToastKind.InstallFailed ? "M3,3 L11,11 M11,3 L3,11" :
+                    IsFailure(kind) ? "M3,3 L11,11 M11,3 L3,11" :
                     kind == LcToastKind.UpdateAvailable ? "M7,13 L7,5 M3,8 L7,4 L11,8 M1,1 L13,1" :
+                    kind == LcToastKind.VerifyDone || kind == LcToastKind.ServerOnline ? "M2,7 L6,11 L12,3" :
                     "M7,1 L7,9 M3,6 L7,10 L11,6 M1,13 L13,13"),
-                Stroke = new SolidColorBrush(kind == LcToastKind.UpdateFailed || kind == LcToastKind.InstallFailed ? ErrorColor : GreyText),
+                Stroke = new SolidColorBrush(IsFailure(kind) ? ErrorColor : GreyText),
                 StrokeThickness = 1.7,
                 StrokeStartLineCap = PenLineCap.Round,
                 StrokeEndLineCap = PenLineCap.Round,
@@ -158,12 +177,16 @@ namespace LanCommanderDirect
                     if (owner == null || !owner.IsVisible || owner.WindowState == WindowState.Minimized) return;
                 }
 
-                bool error = kind == LcToastKind.UpdateFailed || kind == LcToastKind.InstallFailed;
+                bool error = IsFailure(kind);
                 string header, line;
                 switch (kind)
                 {
                     case LcToastKind.Installed: header = "Download Complete"; line = "Your game is ready to play"; break;
                     case LcToastKind.Updated: header = "Update Complete"; line = "Your game is up to date"; break;
+                    case LcToastKind.ServerOffline: header = "Server Unreachable"; line = string.IsNullOrWhiteSpace(detail) ? "Installed games still work" : detail; break;
+                    case LcToastKind.ServerOnline: header = "Server Connected"; line = "LANCommander is reachable again"; break;
+                    case LcToastKind.VerifyDone: header = "Verification Complete"; line = string.IsNullOrWhiteSpace(detail) ? "All files are intact" : detail; break;
+                    case LcToastKind.VerifyFailed: header = "Verification Failed"; line = string.IsNullOrWhiteSpace(detail) ? "Something went wrong" : detail; break;
                     case LcToastKind.UpdateAvailable: header = "Update Available"; line = "Update it from the game's menu"; break;
                     case LcToastKind.InstallFailed: header = "Install Failed"; line = string.IsNullOrWhiteSpace(detail) ? "Something went wrong" : detail; break;
                     default: header = "Update Failed"; line = string.IsNullOrWhiteSpace(detail) ? "Something went wrong" : detail; break;
@@ -338,7 +361,7 @@ namespace LanCommanderDirect
                 win.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(250)));
 
                 // sound
-                if (cfg.PopupSound) PlaySound(cfg.PopupSoundPath, cfg.PopupSoundVolume);
+                if (cfg.PopupSound) PlaySound(SoundFor(kind, cfg), cfg.PopupSoundVolume);
 
                 double hold = error ? 8 : 6;
 

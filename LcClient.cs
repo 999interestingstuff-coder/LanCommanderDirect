@@ -22,12 +22,48 @@ namespace LanCommanderDirect
     {
         readonly HttpClient http;
         readonly LcConfig cfg;
+        readonly int answerTimeoutSeconds;
         string token;
 
-        public LcClient(LcConfig cfg)
+        /// <summary>answerTimeoutSeconds = how long the server may take to start answering a request before it counts as unreachable.</summary>
+        public LcClient(LcConfig cfg, int answerTimeoutSeconds = 30)
         {
             this.cfg = cfg;
+            this.answerTimeoutSeconds = answerTimeoutSeconds;
             http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        }
+
+        /// <summary>
+        /// Sends a request. A server that can't be reached, or doesn't answer in time, becomes an LcServerUnreachableException
+        /// (an answer with an error status is not that). Only the wait for the answer is limited; a download that has started can take as long as it needs.
+        /// </summary>
+        async Task<HttpResponseMessage> SendGuardedAsync(HttpRequestMessage req, HttpCompletionOption option, CancellationToken ct)
+        {
+            using (var limit = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                limit.CancelAfter(TimeSpan.FromSeconds(answerTimeoutSeconds));
+                try
+                {
+                    return await http.SendAsync(req, option, limit.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    throw new LcServerUnreachableException(cfg.ServerUrl.TrimEnd('/'), "no answer within " + answerTimeoutSeconds + " seconds", null);
+                }
+                catch (HttpRequestException e)
+                {
+                    var inner = e;
+                    Exception x = e;
+                    while (x.InnerException != null) x = x.InnerException;
+                    throw new LcServerUnreachableException(cfg.ServerUrl.TrimEnd('/'), x.Message, inner);
+                }
+            }
+        }
+
+        /// <summary>Checks that the server answers and the login works. Throws LcServerUnreachableException if it can't be reached.</summary>
+        public Task PingAsync(CancellationToken ct)
+        {
+            return LoginAsync(ct);
         }
 
         string Url(string path)
@@ -43,7 +79,7 @@ namespace LanCommanderDirect
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
 
-            using (var resp = await http.SendAsync(req, ct).ConfigureAwait(false))
+            using (var resp = await SendGuardedAsync(req, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false))
             {
                 var text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
                 if (!resp.IsSuccessStatusCode)
@@ -76,7 +112,7 @@ namespace LanCommanderDirect
                 if (configure != null)
                     configure(req);
 
-                var resp = await http.SendAsync(req, option, ct).ConfigureAwait(false);
+                var resp = await SendGuardedAsync(req, option, ct).ConfigureAwait(false);
                 if (req.Content != null)
                     req.Content.Dispose();
 

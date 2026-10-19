@@ -30,6 +30,8 @@ namespace LanCommanderDirect
         bool popupOverGames = true;
         bool popupSound = true;
         string popupSoundPath = "";
+        string popupSoundFailPath = "";
+        string popupSoundAvailablePath = "";
         int popupSoundVolume = 70;
 
         public string ServerUrl { get { return serverUrl; } set { SetValue(ref serverUrl, value); } }
@@ -45,6 +47,8 @@ namespace LanCommanderDirect
         public bool PopupOverGames { get { return popupOverGames; } set { SetValue(ref popupOverGames, value); } }
         public bool PopupSound { get { return popupSound; } set { SetValue(ref popupSound, value); } }
         public string PopupSoundPath { get { return popupSoundPath; } set { SetValue(ref popupSoundPath, value); } }
+        public string PopupSoundFailPath { get { return popupSoundFailPath; } set { SetValue(ref popupSoundFailPath, value); } }
+        public string PopupSoundAvailablePath { get { return popupSoundAvailablePath; } set { SetValue(ref popupSoundAvailablePath, value); } }
         public int PopupSoundVolume { get { return popupSoundVolume; } set { SetValue(ref popupSoundVolume, value); } }
 
         public LcSettings(LanCommanderLibrary plugin)
@@ -68,6 +72,8 @@ namespace LanCommanderDirect
             PopupOverGames = c.PopupOverGames;
             PopupSound = c.PopupSound;
             PopupSoundPath = c.PopupSoundPath ?? "";
+            PopupSoundFailPath = c.PopupSoundFailPath ?? "";
+            PopupSoundAvailablePath = c.PopupSoundAvailablePath ?? "";
             PopupSoundVolume = Math.Max(0, Math.Min(100, c.PopupSoundVolume));
         }
 
@@ -88,6 +94,8 @@ namespace LanCommanderDirect
                 PopupOverGames = PopupOverGames,
                 PopupSound = PopupSound,
                 PopupSoundPath = (PopupSoundPath ?? "").Trim(),
+                PopupSoundFailPath = (PopupSoundFailPath ?? "").Trim(),
+                PopupSoundAvailablePath = (PopupSoundAvailablePath ?? "").Trim(),
                 PopupSoundVolume = PopupSoundVolume
             };
         }
@@ -181,26 +189,9 @@ namespace LanCommanderDirect
             panel.Children.Add(Check("PopupNotifications", "Show a popup when a game has been installed or updated"));
             panel.Children.Add(Check("PopupOverGames", "Show that popup over everything, including running borderless/windowed games (off = only inside Playnite's window)"));
             panel.Children.Add(Check("PopupSound", "Play a sound with the popup (choose the file below; no file = silent)"));
-            panel.Children.Add(Label("Popup sound file (wav, mp3, wma...)"));
-            var soundRow = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
-            var soundTest = new Button { Content = "Test", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(12, 4, 12, 4) };
-            var soundClear = new Button { Content = "Clear", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(12, 4, 12, 4) };
-            var soundBrowse = new Button { Content = "Browse...", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(12, 4, 12, 4) };
-            DockPanel.SetDock(soundTest, Dock.Right);
-            DockPanel.SetDock(soundClear, Dock.Right);
-            DockPanel.SetDock(soundBrowse, Dock.Right);
-            soundBrowse.Click += (s, e) =>
-            {
-                var file = api.Dialogs.SelectFile("Audio files|*.wav;*.mp3;*.wma;*.m4a;*.aac|All files|*.*");
-                if (!string.IsNullOrEmpty(file)) settings.PopupSoundPath = file;
-            };
-            soundClear.Click += (s, e) => { settings.PopupSoundPath = ""; };
-            soundTest.Click += (s, e) => LcToast.PlaySound(settings.PopupSoundPath, settings.PopupSoundVolume);
-            soundRow.Children.Add(soundTest);
-            soundRow.Children.Add(soundClear);
-            soundRow.Children.Add(soundBrowse);
-            soundRow.Children.Add(Box("PopupSoundPath", 0));
-            panel.Children.Add(soundRow);
+            AddSoundRow(panel, settings, api, "Sound when an install, update or verification finishes (wav, mp3, wma...)", "PopupSoundPath", () => settings.PopupSoundPath);
+            AddSoundRow(panel, settings, api, "Sound when something fails (failed install/update, server unreachable)", "PopupSoundFailPath", () => settings.PopupSoundFailPath);
+            AddSoundRow(panel, settings, api, "Sound when an update is available", "PopupSoundAvailablePath", () => settings.PopupSoundAvailablePath);
 
             panel.Children.Add(Label("Popup sound volume"));
             var volume = new Slider { Minimum = 0, Maximum = 100, TickFrequency = 1, IsSnapToTickEnabled = true, Margin = new Thickness(0, 0, 0, 12) };
@@ -244,6 +235,34 @@ namespace LanCommanderDirect
             });
 
             Content = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = panel };
+        }
+
+        /// <summary>A label plus a path box with Browse / Clear / Test buttons for one sound.</summary>
+        static void AddSoundRow(StackPanel panel, LcSettings settings, IPlayniteAPI api, string label, string bindingPath, Func<string> currentPath)
+        {
+            panel.Children.Add(Label(label));
+            var row = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
+            var test = new Button { Content = "Test", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(12, 4, 12, 4) };
+            var clear = new Button { Content = "Clear", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(12, 4, 12, 4) };
+            var browse = new Button { Content = "Browse...", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(12, 4, 12, 4) };
+            DockPanel.SetDock(test, Dock.Right);
+            DockPanel.SetDock(clear, Dock.Right);
+            DockPanel.SetDock(browse, Dock.Right);
+
+            var property = typeof(LcSettings).GetProperty(bindingPath);
+            browse.Click += (s, e) =>
+            {
+                var file = api.Dialogs.SelectFile("Audio files|*.wav;*.mp3;*.wma;*.m4a;*.aac|All files|*.*");
+                if (!string.IsNullOrEmpty(file)) property.SetValue(settings, file, null);
+            };
+            clear.Click += (s, e) => property.SetValue(settings, "", null);
+            test.Click += (s, e) => LcToast.PlaySound(currentPath(), settings.PopupSoundVolume);
+
+            row.Children.Add(test);
+            row.Children.Add(clear);
+            row.Children.Add(browse);
+            row.Children.Add(Box(bindingPath, 0));
+            panel.Children.Add(row);
         }
 
         static CheckBox Check(string bindingPath, string text)

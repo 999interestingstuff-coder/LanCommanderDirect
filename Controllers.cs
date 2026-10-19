@@ -319,7 +319,7 @@ namespace LanCommanderDirect
         /// Stops early, with a clear message, if the drives can't hold the download and the extracted game. Only checks
         /// what it can read; network paths are skipped. needsStaging = an update, which extracts into the download folder first.
         /// </summary>
-        public static void CheckSpace(LcConfig cfg, string installDir, LcArchive archive, bool needsStaging, string file)
+        public static void CheckSpace(LcConfig cfg, string installDir, LcArchive archive, bool needsStaging, string file, bool extractsToInstall = true)
         {
             try
             {
@@ -332,7 +332,7 @@ namespace LanCommanderDirect
                 if (File.Exists(part)) already = new FileInfo(part).Length;
 
                 long downloadNeed = Math.Max(0, compressed - already) + (needsStaging ? extracted : 0);
-                long installNeed = extracted;
+                long installNeed = extractsToInstall ? extracted : 0;
 
                 var downloadRoot = Path.GetPathRoot(Path.GetFullPath(Path.GetDirectoryName(file)));
                 var installRoot = Path.GetPathRoot(Path.GetFullPath(installDir));
@@ -408,7 +408,7 @@ namespace LanCommanderDirect
                 {
                     if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
 
-                    var network = e is IOException || e is System.Net.Http.HttpRequestException || e is System.Net.WebException;
+                    var network = e is IOException || e is System.Net.Http.HttpRequestException || e is System.Net.WebException || e is LcServerUnreachableException;
                     if (!network || attempt >= attempts) throw;
 
                     logger.Warn(e, "LANCommander: download interrupted, retrying (" + attempt + "/" + (attempts - 1) + ")");
@@ -766,6 +766,8 @@ namespace LanCommanderDirect
                     if (error != null)
                     {
                         logger.Error(error, "LANCommander install failed");
+                        if (error is LcServerUnreachableException)
+                            plugin.NoteServerUnreachable(cfg, false);
                         api.Notifications.Remove(noteId);
                         api.Notifications.Add(new NotificationMessage(noteId, gameName + ": install failed: " + error.Message, NotificationType.Error));
                         if (cfg.PopupNotifications)
@@ -775,6 +777,7 @@ namespace LanCommanderDirect
                         return;
                     }
 
+                    plugin.NoteServerOk(cfg);
                     ApplyPlayAction(installDir, info);
                     InvokeOnInstalled(new GameInstalledEventArgs(new GameInstallationData { InstallDirectory = installDir }));
                     api.Notifications.Remove(noteId);

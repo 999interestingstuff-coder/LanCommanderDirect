@@ -178,7 +178,17 @@ namespace LanCommanderDirect
 
             try
             {
-                return Task.Run(() => FetchAsync(cfg, installed, previous, mediaDir, args.CancelToken)).GetAwaiter().GetResult();
+                var games = Task.Run(() => FetchAsync(cfg, installed, previous, mediaDir, args.CancelToken)).GetAwaiter().GetResult();
+                NoteServerOk(cfg);
+                return games;
+            }
+            catch (LcServerUnreachableException e)
+            {
+                // not an error of the plugin: the server is off or out of reach. Installed games keep working and nothing is removed.
+                logger.Warn(e, "LANCommander server unreachable during the library update");
+                try { PlayniteApi.Notifications.Remove("lc-import-error"); } catch { }
+                NoteServerUnreachable(cfg, true);
+                return new List<GameMetadata>();
             }
             catch (Exception e)
             {
@@ -338,6 +348,11 @@ namespace LanCommanderDirect
         {
             LcInstallRegistry.Init(Path.Combine(GetPluginUserDataPath(), "installs.json"));
             RunPostSync();
+
+            // tell the user early if the server can't be reached (never with no credentials entered: LoadConfigQuiet is null then)
+            var cfg = LoadConfigQuiet();
+            if (cfg != null)
+                Task.Run(() => PingServer(cfg, true));
         }
 
         public override void OnLibraryUpdated(OnLibraryUpdatedEventArgs args)
@@ -350,8 +365,6 @@ namespace LanCommanderDirect
             var cfg = LoadConfigQuiet();
             if (cfg == null) return;
 
-            LogDuplicateDiagnostics();
-
             try { ApplyServerState(cfg); }
             catch (Exception e) { logger.Warn(e, "LANCommander: applying server metadata failed"); }
 
@@ -360,34 +373,6 @@ namespace LanCommanderDirect
 
             try { CheckUpdates(cfg, false); }
             catch (Exception e) { logger.Warn(e, "LANCommander: update check failed"); }
-        }
-
-        /// <summary>
-        /// Writes to extensions.log whenever the same game name appears more than once in the library and at least one
-        /// of the entries comes from this plugin, with the details that tell the entries apart.
-        /// </summary>
-        void LogDuplicateDiagnostics()
-        {
-            try
-            {
-                var all = PlayniteApi.Database.Games.ToList();
-                var ours = all.Where(g => g.PluginId == Id).ToList();
-                logger.Info("LANCommander: the library has " + ours.Count + " game(s) from this plugin (plugin id " + Id + ").");
-
-                var ourNames = new HashSet<string>(ours.Select(g => g.Name ?? ""), StringComparer.OrdinalIgnoreCase);
-                foreach (var group in all.Where(g => ourNames.Contains(g.Name ?? "")).GroupBy(g => (g.Name ?? "").ToLowerInvariant()).Where(x => x.Count() > 1))
-                {
-                    logger.Warn("LANCommander: " + group.Count() + " library entries named \"" + group.First().Name + "\": " +
-                        string.Join(" | ", group.Select(g =>
-                            "id=" + g.Id + " pluginId=" + g.PluginId + " gameId=" + g.GameId +
-                            " source=" + (g.Source != null ? g.Source.Name : "none") +
-                            " installed=" + g.IsInstalled + " dir=" + g.InstallDirectory)));
-                }
-            }
-            catch (Exception e)
-            {
-                logger.Warn(e, "LANCommander: duplicate diagnostics failed");
-            }
         }
 
         // ---------- server is the source of truth: logos, videos and Playnite fields ----------
@@ -857,6 +842,99 @@ namespace LanCommanderDirect
             return ".png";
         }
 
+        // ---------- server reachable or not ----------
+
+        /// <summary>The server answered: clears the "unreachable" notice and says so once if it was marked unreachable. Does nothing if nothing is configured.</summary>
+        public void NoteServerOk(LcConfig cfg)
+        {
+            if (cfg == null) return;
+            if (!LcServerStatus.SetOnline()) return;
+
+            try { PlayniteApi.Notifications.Remove("lc-offline"); } catch { }
+            if (cfg.PopupNotifications)
+                LcToast.Show(PlayniteApi, null, LcToastKind.ServerOnline, null, cfg);
+        }
+
+        /// <summary>
+        /// The server could not be reached. Shows one notice in the panel and, when it has just changed from reachable and
+        /// announce is set, the popup. Does nothing if nothing is configured, and a wrong password never counts as unreachable.
+        /// </summary>
+        public void NoteServerUnreachable(LcConfig cfg, bool announce)
+        {
+            if (cfg == null) return;
+            var changed = LcServerStatus.SetOffline();
+
+            try
+            {
+                PlayniteApi.Notifications.Remove("lc-offline");
+                PlayniteApi.Notifications.Add(new NotificationMessage(
+                    "lc-offline",
+                    "LANCommander: can't reach the server at " + cfg.ServerUrl.TrimEnd('/') + ". Installed games still launch. " +
+                    "Installing, updating and library updates need the server; they work again once it is back (check it from the LANCommander menu).",
+                    NotificationType.Error));
+            }
+            catch { }
+
+            if (changed && announce && cfg.PopupNotifications)
+                LcToast.Show(PlayniteApi, null, LcToastKind.ServerOffline, "Installed games still work", cfg);
+        }
+
+        void PingServer(LcConfig cfg, bool announce)
+        {
+            try
+            {
+                using (var client = new LcClient(cfg, 8))
+                    Task.Run(() => client.PingAsync(CancellationToken.None)).GetAwaiter().GetResult();
+                NoteServerOk(cfg);
+            }
+            catch (LcServerUnreachableException e)
+            {
+                logger.Warn(e, "LANCommander server unreachable");
+                NoteServerUnreachable(cfg, announce);
+            }
+            catch (Exception e)
+            {
+                // the server answered (for example it refused the login), so it is reachable
+                logger.Warn(e, "LANCommander server check");
+                NoteServerOk(cfg);
+            }
+        }
+
+        void CheckConnectionFromMenu()
+        {
+            var cfg = LoadConfig();
+            if (cfg == null) return;
+
+            string message = null;
+            bool ok = false;
+            PlayniteApi.Dialogs.ActivateGlobalProgress(p =>
+            {
+                try
+                {
+                    using (var client = new LcClient(cfg, 10))
+                        Task.Run(() => client.PingAsync(p.CancelToken)).GetAwaiter().GetResult();
+                    ok = true;
+                    NoteServerOk(cfg);
+                }
+                catch (OperationCanceledException) { }
+                catch (LcServerUnreachableException e)
+                {
+                    message = e.Message;
+                    NoteServerUnreachable(cfg, false);
+                }
+                catch (Exception e)
+                {
+                    message = "The server answered, but: " + e.Message;
+                    NoteServerOk(cfg);
+                }
+            }, new GlobalProgressOptions("Checking the LANCommander server...", true) { IsIndeterminate = true });
+
+            if (ok)
+                PlayniteApi.Dialogs.ShowMessage("Connected to " + cfg.ServerUrl.TrimEnd('/') + " and logged in.", "LANCommander");
+            else if (message != null)
+                PlayniteApi.Dialogs.ShowErrorMessage(message, "LANCommander");
+        }
+
         // ---------- play sessions ----------
 
         public override void OnGameStarting(OnGameStartingEventArgs args)
@@ -870,6 +948,7 @@ namespace LanCommanderDirect
             PlayniteApi.Dialogs.ActivateGlobalProgress(p =>
             {
                 try { BeforePlay(cfg, game, p.CancelToken); }
+                catch (LcServerUnreachableException e) { logger.Warn(e, "LANCommander: server unreachable, play session not reported for " + game.Name); NoteServerUnreachable(cfg, false); }
                 catch (Exception e) { ReportSyncProblem(game, "before playing", e); }
             }, new GlobalProgressOptions("Starting LANCommander play session for " + game.Name + "...", false) { IsIndeterminate = true });
         }
@@ -886,6 +965,7 @@ namespace LanCommanderDirect
             PlayniteApi.Dialogs.ActivateGlobalProgress(p =>
             {
                 try { AfterPlay(cfg, game, elapsedSeconds, p.CancelToken); }
+                catch (LcServerUnreachableException e) { logger.Warn(e, "LANCommander: server unreachable, play session end not reported for " + game.Name); NoteServerUnreachable(cfg, false); }
                 catch (Exception e) { ReportSyncProblem(game, "after playing", e); }
             }, new GlobalProgressOptions("Saving LANCommander play session for " + game.Name + "...", false) { IsIndeterminate = true });
         }
@@ -903,7 +983,8 @@ namespace LanCommanderDirect
         {
             var id = Guid.Parse(game.GameId);
 
-            using (var client = new LcClient(cfg))
+            // a short wait: a switched-off server must not hold the game back for long
+            using (var client = new LcClient(cfg, 5))
             {
                 try
                 {
@@ -922,7 +1003,7 @@ namespace LanCommanderDirect
         {
             var id = Guid.Parse(game.GameId);
 
-            using (var client = new LcClient(cfg))
+            using (var client = new LcClient(cfg, 5))
             {
                 try
                 {
@@ -957,6 +1038,18 @@ namespace LanCommanderDirect
                 MenuSection = "LANCommander",
                 Action = a => LcUpdater.Enqueue(PlayniteApi, this, games)
             };
+            yield return new GameMenuItem
+            {
+                Description = "Verify / repair files (quick: checks file sizes)",
+                MenuSection = "LANCommander",
+                Action = a => LcVerify.Start(PlayniteApi, this, games, false)
+            };
+            yield return new GameMenuItem
+            {
+                Description = "Verify / repair files (full: compares file contents, slower)",
+                MenuSection = "LANCommander",
+                Action = a => LcVerify.Start(PlayniteApi, this, games, true)
+            };
         }
 
         public override IEnumerable<MainMenuItem> GetMainMenuItems(GetMainMenuItemsArgs args)
@@ -966,6 +1059,12 @@ namespace LanCommanderDirect
                 Description = "Scan install folder for installed games",
                 MenuSection = "@LANCommander",
                 Action = a => ScanFromMenu()
+            };
+            yield return new MainMenuItem
+            {
+                Description = "Check server connection",
+                MenuSection = "@LANCommander",
+                Action = a => CheckConnectionFromMenu()
             };
             yield return new MainMenuItem
             {

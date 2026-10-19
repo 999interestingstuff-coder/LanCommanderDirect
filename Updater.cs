@@ -94,10 +94,14 @@ namespace LanCommanderDirect
                         if (error != null)
                         {
                             logger.Error(error, "LANCommander update failed for " + name);
+                            if (error is LcServerUnreachableException)
+                                plugin.NoteServerUnreachable(cfg, false);
                             api.Notifications.Add(new NotificationMessage(noteId, name + ": update failed: " + error.Message, NotificationType.Error));
                             if (cfg.PopupNotifications) LcToast.Show(api, game, LcToastKind.UpdateFailed, error.Message, cfg);
                             return;
                         }
+
+                        plugin.NoteServerOk(cfg);
 
                         if (info != null && !string.IsNullOrWhiteSpace(info.Version))
                         {
