@@ -597,7 +597,10 @@ namespace LanCommanderDirect
                         logger.Error(error, "LANCommander install failed");
                         api.Notifications.Remove(noteId);
                         api.Notifications.Add(new NotificationMessage(noteId, gameName + ": install failed: " + error.Message, NotificationType.Error));
-                        api.Dialogs.ShowErrorMessage(error.Message, "LANCommander install failed");
+                        if (cfg.PopupNotifications)
+                            LcToast.Show(api, Game, LcToastKind.InstallFailed, error.Message, cfg);
+                        else
+                            api.Dialogs.ShowErrorMessage(error.Message, "LANCommander install failed");
                         return;
                     }
 

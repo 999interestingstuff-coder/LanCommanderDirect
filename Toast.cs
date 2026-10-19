@@ -19,7 +19,8 @@ namespace LanCommanderDirect
     {
         Installed,
         Updated,
-        UpdateFailed
+        UpdateFailed,
+        InstallFailed
     }
 
     /// <summary>
@@ -83,7 +84,7 @@ namespace LanCommanderDirect
             }
         }
 
-        /// <summary>Shows a popup for a game. detail is only used for UpdateFailed (the error text).</summary>
+        /// <summary>Shows a popup for a game. detail is only used for the failed kinds (the error text).</summary>
         public static void Show(IPlayniteAPI api, Game game, LcToastKind kind, string detail, LcConfig cfg)
         {
             try
@@ -153,12 +154,13 @@ namespace LanCommanderDirect
                     if (owner == null || !owner.IsVisible || owner.WindowState == WindowState.Minimized) return;
                 }
 
-                bool error = kind == LcToastKind.UpdateFailed;
+                bool error = kind == LcToastKind.UpdateFailed || kind == LcToastKind.InstallFailed;
                 string header, line;
                 switch (kind)
                 {
                     case LcToastKind.Installed: header = "Download Complete"; line = "Your game is ready to play"; break;
                     case LcToastKind.Updated: header = "Update Complete"; line = "Your game is up to date"; break;
+                    case LcToastKind.InstallFailed: header = "Install Failed"; line = string.IsNullOrWhiteSpace(detail) ? "Something went wrong" : detail; break;
                     default: header = "Update Failed"; line = string.IsNullOrWhiteSpace(detail) ? "Something went wrong" : detail; break;
                 }
 
