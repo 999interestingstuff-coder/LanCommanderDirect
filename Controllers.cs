@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
@@ -32,21 +33,31 @@ namespace LanCommanderDirect
             return p.StartsWith(r, StringComparison.OrdinalIgnoreCase) && p.Length > r.Length;
         }
 
-        public static string FindSevenZip(LcConfig cfg)
+        /// <summary>The configured 7z.exe, else one in Program Files or on the PATH. Null if 7-Zip isn't installed.</summary>
+        public static string TryFindSevenZip(LcConfig cfg)
         {
             if (!string.IsNullOrWhiteSpace(cfg.SevenZipPath) && File.Exists(cfg.SevenZipPath))
                 return cfg.SevenZipPath;
 
-            var candidates = new[]
+            var candidates = new List<string>
             {
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "7-Zip", "7z.exe"),
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "7-Zip", "7z.exe"),
             };
-            foreach (var c in candidates)
-                if (File.Exists(c)) return c;
 
-            throw new FileNotFoundException(
-                "This archive is not a zip, so 7-Zip is needed. Install 7-Zip or set SevenZipPath (7z.exe) in the LANCommander config.json.");
+            try
+            {
+                foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
+                    if (!string.IsNullOrWhiteSpace(dir))
+                        candidates.Add(Path.Combine(dir.Trim().Trim('"'), "7z.exe"));
+            }
+            catch { }
+
+            foreach (var c in candidates)
+            {
+                try { if (File.Exists(c)) return c; } catch { }
+            }
+            return null;
         }
     }
 
@@ -96,15 +107,26 @@ namespace LanCommanderDirect
             }
         }
 
-        public static void Extract7z(string sevenZip, string archive, string destDir, CancellationToken ct)
+        /// <summary>
+        /// Extracts with 7-Zip and reports percent. Newer 7-Zip versions print progress with -bsp1; if the installed one
+        /// doesn't know that switch (exit code 7), it runs again without it and just shows no percentage.
+        /// </summary>
+        public static void Extract7z(string sevenZip, string archive, string destDir, Action<double> progress, CancellationToken ct)
         {
             if (Path.GetFileName(sevenZip).Equals("7zFM.exe", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("SevenZipPath points at 7zFM.exe (the file manager). Use 7z.exe.");
 
+            if (!Run7z(sevenZip, "x \"" + archive + "\" -o\"" + destDir + "\" -y -bso0 -bsp1 -bse1", progress, ct))
+                Run7z(sevenZip, "x \"" + archive + "\" -o\"" + destDir + "\" -y", null, ct);
+        }
+
+        /// <summary>Runs 7-Zip. Returns false only for "unknown command line" (exit code 7), so the caller can retry with plainer switches.</summary>
+        static bool Run7z(string sevenZip, string arguments, Action<double> progress, CancellationToken ct)
+        {
             var psi = new ProcessStartInfo
             {
                 FileName = sevenZip,
-                Arguments = "x \"" + archive + "\" -o\"" + destDir + "\" -y",
+                Arguments = arguments,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
@@ -112,13 +134,47 @@ namespace LanCommanderDirect
             };
 
             var output = new StringBuilder();
+            Action<string> keep = line =>
+            {
+                lock (output)
+                {
+                    output.AppendLine(line);
+                    if (output.Length > 8000) output.Remove(0, output.Length - 4000);
+                }
+            };
+
             using (var proc = new Process { StartInfo = psi })
             {
-                proc.OutputDataReceived += (s, e) => { if (e.Data != null) lock (output) output.AppendLine(e.Data); };
-                proc.ErrorDataReceived += (s, e) => { if (e.Data != null) lock (output) output.AppendLine(e.Data); };
+                proc.ErrorDataReceived += (s, e) => { if (e.Data != null) keep(e.Data); };
                 proc.Start();
-                proc.BeginOutputReadLine();
                 proc.BeginErrorReadLine();
+
+                // progress arrives as "  12%" pieces separated by carriage returns, so read character by character
+                var reader = Task.Run(() =>
+                {
+                    var sb = new StringBuilder();
+                    Action flush = () =>
+                    {
+                        var line = sb.ToString().Trim();
+                        sb.Clear();
+                        if (line.Length == 0) return;
+
+                        var m = System.Text.RegularExpressions.Regex.Match(line, @"^(\d{1,3})%");
+                        if (m.Success)
+                        {
+                            if (progress != null) progress(Math.Min(100, int.Parse(m.Groups[1].Value)));
+                        }
+                        else keep(line);
+                    };
+
+                    int c;
+                    while ((c = proc.StandardOutput.Read()) >= 0)
+                    {
+                        if (c == '\r' || c == '\n') flush();
+                        else sb.Append((char)c);
+                    }
+                    flush();
+                });
 
                 while (!proc.WaitForExit(500))
                 {
@@ -129,15 +185,18 @@ namespace LanCommanderDirect
                     }
                 }
                 proc.WaitForExit();
+                try { reader.Wait(5000); } catch { }
 
                 string text;
                 lock (output) text = output.ToString();
-                logger.Info("LANCommander: 7-Zip exit code " + proc.ExitCode + ", output:\n" + text);
+                logger.Info("LANCommander: 7-Zip exit code " + proc.ExitCode + (text.Length > 0 ? ", output:\n" + text : ""));
 
+                if (proc.ExitCode == 7 && progress != null) return false;
                 if (proc.ExitCode > 1)
                     throw new InvalidOperationException("7-Zip failed (exit code " + proc.ExitCode + "): " +
                         (text.Length > 800 ? text.Substring(text.Length - 800) : text));
             }
+            return true;
         }
     }
 
@@ -443,10 +502,14 @@ namespace LanCommanderDirect
             p.Text = "Extracting " + gameName + "...";
             p.CurrentProgressValue = 0;
 
-            if (LcExtract.IsZip(file))
+            // 7-Zip extracts everything when it is installed; without it, zip archives use the built-in extractor
+            var sevenZip = LcPaths.TryFindSevenZip(cfg);
+            if (sevenZip != null)
+                LcExtract.Extract7z(sevenZip, file, destDir, pct => p.CurrentProgressValue = pct, ct);
+            else if (LcExtract.IsZip(file))
                 LcExtract.ExtractZip(file, destDir, pct => p.CurrentProgressValue = pct, ct);
             else
-                LcExtract.Extract7z(LcPaths.FindSevenZip(cfg), file, destDir, ct);
+                throw new FileNotFoundException("This archive is not a zip, so 7-Zip is needed. Install 7-Zip or set the 7z.exe path in the plugin settings.");
 
             if (!Directory.EnumerateFileSystemEntries(destDir).Any())
                 throw new InvalidOperationException("The archive extracted nothing.");

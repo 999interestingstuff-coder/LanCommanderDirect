@@ -15,7 +15,7 @@ namespace LanCommanderDirect
         /// <summary>Folder games get installed into. Empty = %USERPROFILE%\Games\LANCommander</summary>
         public string InstallRoot { get; set; } = "";
 
-        /// <summary>Only needed for non-zip archives. Full path to 7z.exe. Empty = auto-detect.</summary>
+        /// <summary>Full path to 7z.exe, used to extract every archive. Empty = auto-detect (Program Files, PATH); without 7-Zip, zip archives use the built-in extractor.</summary>
         public string SevenZipPath { get; set; } = "";
 
         /// <summary>Report play sessions (start/stop) to the server.</summary>

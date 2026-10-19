@@ -141,3 +141,10 @@ where it is, so don't move or delete it afterwards.
 - **Different sounds.** Three sounds in the settings: finished (install, update, server back), failed
   (failed install/update, server unreachable), and update available. An empty one is silent; the volume is shared.
 
+## Extraction with 7-Zip (0.5.2)
+
+If 7-Zip is installed (found in Program Files, on the PATH, or at the path set in the settings), it extracts every archive,
+zip files included, and the progress notification shows its percentage. Without 7-Zip, zip archives still use Windows'
+built-in extractor, and anything that isn't a zip fails with a message asking for 7-Zip. (Very old 7-Zip versions that don't
+report progress still work, just without a percentage.)
+

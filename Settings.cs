@@ -175,7 +175,7 @@ namespace LanCommanderDirect
             rootRow.Children.Add(Box("InstallRoot", 0));
             panel.Children.Add(rootRow);
 
-            panel.Children.Add(Label("7z.exe path (only needed for archives that are not zip; empty = auto-detect)"));
+            panel.Children.Add(Label("7z.exe path (used to extract all archives; empty = auto-detect in Program Files or PATH; without 7-Zip, zip archives use Windows' built-in extractor)"));
             panel.Children.Add(Box("SevenZipPath"));
 
             var timeBox = new CheckBox
