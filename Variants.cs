@@ -245,11 +245,20 @@ namespace LanCommanderDirect
             return action;
         }
 
-        /// <summary>Adds any missing variant launch options to the base game. Existing ones are left alone.</summary>
+        /// <summary>
+        /// Adds any missing variant launch options to the base game, always after the base game's own Play action,
+        /// because Playnite's Play button starts the first play action. Existing ones are left alone.
+        /// </summary>
         public static void EnsureActions(IPlayniteAPI api, Game game, LcConfig cfg, List<LcVariant> variants)
         {
             if (game.GameActions == null)
                 game.GameActions = new ObservableCollection<GameAction>();
+
+            Func<GameAction, bool> isVariant = a => variants.Any(v => string.Equals(a.Name, v.Title, StringComparison.OrdinalIgnoreCase));
+
+            // no own Play action yet (not installed / still being set up): adding variants now would make one of them the default
+            if (!game.GameActions.Any(a => a.IsPlayAction && !isVariant(a)))
+                return;
 
             var changed = false;
             foreach (var v in variants)
@@ -258,6 +267,22 @@ namespace LanCommanderDirect
                     continue;
                 game.GameActions.Add(BuildAction(cfg, v));
                 changed = true;
+            }
+
+            // a variant that ended up in front of the base Play action (older versions did this) is moved behind it
+            var ownIndex = -1;
+            for (int i = 0; i < game.GameActions.Count; i++)
+                if (game.GameActions[i].IsPlayAction && !isVariant(game.GameActions[i])) { ownIndex = i; break; }
+
+            if (ownIndex > 0)
+            {
+                var inFront = game.GameActions.Take(ownIndex).Where(isVariant).ToList();
+                foreach (var a in inFront)
+                {
+                    game.GameActions.Remove(a);
+                    game.GameActions.Add(a);
+                    changed = true;
+                }
             }
 
             if (changed) api.Database.Games.Update(game);
