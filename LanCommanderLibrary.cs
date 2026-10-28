@@ -1124,9 +1124,10 @@ namespace LanCommanderDirect
         /// Called while Playnite is starting a variant's launch option. If the variant isn't on disk yet it is
         /// downloaded and extracted first. This runs before Playnite starts the exe, behind a progress dialog.
         /// </summary>
-        void PrepareVariant(LcConfig cfg, Game game, LcVariant v, GameAction source, Dictionary<string, List<LcVariant>> map)
+        /// <returns>True if the variant was downloaded just now (so Playnite's own start of it can't work).</returns>
+        bool PrepareVariant(LcConfig cfg, Game game, LcVariant v, GameAction source, Dictionary<string, List<LcVariant>> map)
         {
-            if (LcVariants.IsInstalled(cfg, v)) return;
+            if (LcVariants.IsInstalled(cfg, v)) return false;
 
             string error = null;
 
@@ -1160,7 +1161,7 @@ namespace LanCommanderDirect
             if (error != null)
             {
                 PlayniteApi.Dialogs.ShowErrorMessage(error, "LANCommander: " + v.Title);
-                return;
+                return false;
             }
 
             // remember the real exe location, and point the launch option at it
@@ -1184,6 +1185,77 @@ namespace LanCommanderDirect
             }
             if (source != null && !ReferenceEquals(source, stored))
                 apply(source);
+
+            return true;
+        }
+
+        /// <summary>
+        /// Playnite has already fixed the path of the launch option it is starting (the one from before the download),
+        /// so right after a first-time install the variant is started here instead, and its session is tracked here.
+        /// </summary>
+        void LaunchVariantNow(LcConfig cfg, Game game, LcVariant v)
+        {
+            var action = LcVariants.BuildAction(cfg, v);
+            if (!File.Exists(action.Path))
+            {
+                PlayniteApi.Dialogs.ShowErrorMessage("The exe was not found after the install: " + action.Path, "LANCommander: " + v.Title);
+                return;
+            }
+
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = action.Path,
+                Arguments = action.Arguments ?? "",
+                WorkingDirectory = !string.IsNullOrEmpty(action.WorkingDir) && Directory.Exists(action.WorkingDir)
+                    ? action.WorkingDir : Path.GetDirectoryName(action.Path),
+                UseShellExecute = false
+            };
+
+            Task.Run(() =>
+            {
+                if (cfg.TrackPlayTime)
+                {
+                    try { BeforePlay(cfg, game, v.VariantId, CancellationToken.None); }
+                    catch (Exception e) { logger.Warn(e, "LANCommander: could not start the play session for " + v.Title); }
+                }
+
+                var timer = System.Diagnostics.Stopwatch.StartNew();
+                try
+                {
+                    logger.Info("LANCommander: starting " + v.Title + " right after its install: " + psi.FileName + " " + psi.Arguments);
+                    using (var proc = System.Diagnostics.Process.Start(psi))
+                    {
+                        if (proc != null) proc.WaitForExit();
+                    }
+                }
+                catch (Exception e)
+                {
+                    logger.Error(e, "LANCommander: could not start " + v.Title);
+                    PlayniteApi.MainView.UIDispatcher.BeginInvoke(new Action(() =>
+                        PlayniteApi.Dialogs.ShowErrorMessage("Could not start " + v.Title + ": " + e.Message, "LANCommander")));
+                    return;
+                }
+                timer.Stop();
+
+                var seconds = (long)timer.Elapsed.TotalSeconds;
+                try
+                {
+                    PlayniteApi.MainView.UIDispatcher.Invoke(() =>
+                    {
+                        game.Playtime += (ulong)seconds;
+                        game.PlayCount += 1;
+                        game.LastActivity = DateTime.Now;
+                        PlayniteApi.Database.Games.Update(game);
+                    });
+                }
+                catch (Exception e) { logger.Warn(e, "LANCommander: could not save the play time of " + v.Title); }
+
+                if (cfg.TrackPlayTime)
+                {
+                    try { AfterPlay(cfg, game, v.VariantId, seconds, CancellationToken.None); }
+                    catch (Exception e) { logger.Warn(e, "LANCommander: could not end the play session for " + v.Title); }
+                }
+            });
         }
 
         // ---------- play sessions ----------
@@ -1202,8 +1274,17 @@ namespace LanCommanderDirect
             {
                 var map = LcVariants.Load(VariantsPath);
                 variant = LcVariants.Match(map, game, args.SourceAction);
-                if (variant != null)
-                    PrepareVariant(cfg, game, variant, args.SourceAction, map);
+                logger.Info("LANCommander: starting " + game.Name + ", launch option '" +
+                            (args.SourceAction != null ? args.SourceAction.Name : "(default)") + "', variant: " +
+                            (variant != null ? variant.Title : "none"));
+
+                if (variant != null && PrepareVariant(cfg, game, variant, args.SourceAction, map))
+                {
+                    // just downloaded: Playnite's own start would use the old path, so cancel it and start the variant here
+                    args.CancelStartup = true;
+                    LaunchVariantNow(cfg, game, variant);
+                    return;
+                }
             }
             catch (Exception e)
             {
