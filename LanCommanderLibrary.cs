@@ -28,6 +28,9 @@ namespace LanCommanderDirect
 
         string ConfigPath => Path.Combine(GetPluginUserDataPath(), "config.json");
 
+        /// <summary>Which variants (e.g. a VR build) belong to which base game. Written on every library update.</summary>
+        string VariantsPath => Path.Combine(GetPluginUserDataPath(), "variants.json");
+
         /// <summary>Reads config.json without any checks or notifications (used by the settings page).</summary>
         public LcConfig ReadRawConfig()
         {
@@ -103,6 +106,18 @@ namespace LanCommanderDirect
             return cfg;
         }
 
+        /// <summary>Config for working out folder paths only: no notifications, install root filled in with its default.</summary>
+        LcConfig ConfigForPaths()
+        {
+            var cfg = ReadRawConfig();
+            if (string.IsNullOrWhiteSpace(cfg.InstallRoot))
+            {
+                cfg.InstallRoot = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Games", "LANCommander");
+            }
+            return cfg;
+        }
+
         // ---------- library import ----------
 
         public override IEnumerable<GameMetadata> GetGames(LibraryGetGamesArgs args)
@@ -140,6 +155,11 @@ namespace LanCommanderDirect
             var result = new List<GameMetadata>();
             var logos = new Dictionary<string, string>();   // server game id -> cached logo file
 
+            // games tagged "variant-of:<base title>" are not imported as games of their own;
+            // they become extra launch options of the base game
+            var variantGames = new List<Tuple<LcGame, string>>();
+            var variantMap = new Dictionary<string, List<LcVariant>>();
+
             using (var client = new LcClient(cfg))
             {
                 var games = await client.GetGamesAsync(ct).ConfigureAwait(false);
@@ -156,6 +176,13 @@ namespace LanCommanderDirect
                     catch (Exception e)
                     {
                         logger.Warn(e, "Could not load LANCommander details for " + item.Id);
+                    }
+
+                    var variantOf = LcVariants.BaseTitle(g);
+                    if (variantOf != null)
+                    {
+                        variantGames.Add(Tuple.Create(g, variantOf));
+                        continue;
                     }
 
                     var gameId = g.Id.ToString();
@@ -204,6 +231,37 @@ namespace LanCommanderDirect
 
                     result.Add(meta);
                 }
+
+                // link every variant to its base game (matched by title)
+                foreach (var pair in variantGames)
+                {
+                    var vg = pair.Item1;
+                    var baseMeta = result.FirstOrDefault(m => string.Equals(m.Name, pair.Item2, StringComparison.OrdinalIgnoreCase));
+                    if (baseMeta == null)
+                    {
+                        logger.Warn("LANCommander: variant '" + vg.Title + "' is tagged for '" + pair.Item2 + "', but no game with that title exists");
+                        continue;
+                    }
+
+                    var actions = vg.Actions;
+                    if (actions == null || actions.Count == 0)
+                    {
+                        try
+                        {
+                            var manifest = await client.GetManifestAsync(vg.Id, ct).ConfigureAwait(false);
+                            if (manifest != null) actions = manifest.Actions;
+                        }
+                        catch (Exception e)
+                        {
+                            logger.Warn(e, "LANCommander: could not read the manifest of variant " + vg.Title);
+                        }
+                    }
+
+                    List<LcVariant> list;
+                    if (!variantMap.TryGetValue(baseMeta.GameId, out list))
+                        variantMap[baseMeta.GameId] = list = new List<LcVariant>();
+                    list.Add(LcVariants.Build(vg, baseMeta.GameId, actions));
+                }
             }
 
             try
@@ -211,6 +269,13 @@ namespace LanCommanderDirect
                 File.WriteAllText(Path.Combine(Path.GetDirectoryName(mediaDir), "logos.json"), JsonConvert.SerializeObject(logos));
             }
             catch (Exception e) { logger.Warn(e, "Could not write logos.json"); }
+
+            try
+            {
+                LcVariants.KeepResolved(variantMap, LcVariants.Load(VariantsPath));
+                LcVariants.Save(VariantsPath, variantMap);
+            }
+            catch (Exception e) { logger.Warn(e, "Could not write variants.json"); }
 
             return result;
         }
@@ -220,11 +285,13 @@ namespace LanCommanderDirect
         public override void OnApplicationStarted(OnApplicationStartedEventArgs args)
         {
             SyncLogos();
+            SyncVariantActions();
         }
 
         public override void OnLibraryUpdated(OnLibraryUpdatedEventArgs args)
         {
             SyncLogos();
+            SyncVariantActions();
         }
 
         void SyncLogos()
@@ -317,6 +384,172 @@ namespace LanCommanderDirect
             return ".png";
         }
 
+        // ---------- variants (separate full copies such as a VR build, shown as extra launch options) ----------
+
+        /// <summary>Makes sure every installed base game has a launch option for each of its variants.</summary>
+        void SyncVariantActions()
+        {
+            try
+            {
+                var map = LcVariants.Load(VariantsPath);
+                if (map.Count == 0) return;
+
+                var cfg = ConfigForPaths();
+                var games = PlayniteApi.Database.Games
+                    .Where(g => g.PluginId == Id && g.IsInstalled && !string.IsNullOrEmpty(g.GameId))
+                    .ToList();
+
+                PlayniteApi.MainView.UIDispatcher.Invoke(() =>
+                {
+                    foreach (var game in games)
+                    {
+                        List<LcVariant> list;
+                        if (map.TryGetValue(game.GameId, out list))
+                            LcVariants.EnsureActions(PlayniteApi, game, cfg, list);
+                    }
+                });
+            }
+            catch (Exception e)
+            {
+                logger.Warn(e, "LANCommander: variant sync failed");
+            }
+        }
+
+        /// <summary>Right after the base game is installed (its Play action was just rebuilt), add the variant launch options again.</summary>
+        public override void OnGameInstalled(OnGameInstalledEventArgs args)
+        {
+            var game = args.Game;
+            if (game == null || game.PluginId != Id || string.IsNullOrEmpty(game.GameId)) return;
+
+            try
+            {
+                var map = LcVariants.Load(VariantsPath);
+                List<LcVariant> list;
+                if (map.TryGetValue(game.GameId, out list))
+                    LcVariants.EnsureActions(PlayniteApi, game, ConfigForPaths(), list);
+            }
+            catch (Exception e)
+            {
+                logger.Warn(e, "LANCommander: could not add variant launch options for " + game.Name);
+            }
+        }
+
+        /// <summary>Uninstalling the base game also removes the variant copies and their launch options.</summary>
+        public override void OnGameUninstalled(OnGameUninstalledEventArgs args)
+        {
+            var game = args.Game;
+            if (game == null || game.PluginId != Id || string.IsNullOrEmpty(game.GameId)) return;
+
+            try
+            {
+                var map = LcVariants.Load(VariantsPath);
+                List<LcVariant> list;
+                if (!map.TryGetValue(game.GameId, out list)) return;
+
+                var cfg = ConfigForPaths();
+                foreach (var v in list)
+                {
+                    var dir = LcVariants.Dir(cfg, v);
+
+                    // only ever delete inside our own install root
+                    if (Directory.Exists(dir) && LcPaths.IsUnder(dir, cfg.InstallRoot))
+                    {
+                        try { Directory.Delete(dir, true); }
+                        catch (Exception e)
+                        {
+                            logger.Error(e, "LANCommander: could not delete " + dir);
+                            PlayniteApi.Notifications.Add(new NotificationMessage(
+                                "lc-variant-del-" + v.VariantId,
+                                "LANCommander: could not delete the folder of " + v.Title + ": " + e.Message,
+                                NotificationType.Error));
+                        }
+                    }
+
+                    v.Resolved = false;   // the exe is gone, so the next launch has to install it again
+                }
+
+                LcVariants.Save(VariantsPath, map);
+                LcVariants.RemoveActions(PlayniteApi, game, list);
+            }
+            catch (Exception e)
+            {
+                logger.Warn(e, "LANCommander: variant cleanup failed for " + game.Name);
+            }
+        }
+
+        /// <summary>
+        /// The variant started in the current session, per Playnite game id.
+        /// Used to report the play session to the variant's own server entry.
+        /// </summary>
+        readonly Dictionary<Guid, LcVariant> activeVariants = new Dictionary<Guid, LcVariant>();
+        readonly object activeLock = new object();
+
+        /// <summary>
+        /// Called while Playnite is starting a variant's launch option. If the variant isn't on disk yet it is
+        /// downloaded and extracted first. This runs before Playnite starts the exe, behind a progress dialog.
+        /// </summary>
+        void PrepareVariant(LcConfig cfg, Game game, LcVariant v, GameAction source, Dictionary<string, List<LcVariant>> map)
+        {
+            if (LcVariants.IsInstalled(cfg, v)) return;
+
+            string error = null;
+
+            PlayniteApi.Dialogs.ActivateGlobalProgress(a =>
+            {
+                try
+                {
+                    a.ProgressMaxValue = 100;
+
+                    var p = new LcProgress(a.CancelToken, pr =>
+                    {
+                        a.Text = (pr.Text ?? "").TrimEnd('.') + " " + Math.Round(pr.CurrentProgressValue) + "%" +
+                                 (pr.BytesTotal > 0 ? " (" + LcFormat.Bytes(pr.BytesDone) + " of " + LcFormat.Bytes(pr.BytesTotal) + ")" : "");
+                        a.CurrentProgressValue = pr.CurrentProgressValue;
+                    });
+
+                    LcGame info;
+                    var dir = LcVariantInstaller.Install(cfg, v, p, out info);
+
+                    if (!LcVariants.Resolve(dir, info, v))
+                        throw new InvalidOperationException("The download finished, but no .exe was found in " + dir + ".");
+                }
+                catch (OperationCanceledException) { error = "The install of " + v.Title + " was cancelled."; }
+                catch (Exception e)
+                {
+                    logger.Error(e, "LANCommander: variant install failed for " + v.Title);
+                    error = e.Message;
+                }
+            }, new GlobalProgressOptions("Installing " + v.Title + " (first launch)...", true) { IsIndeterminate = false });
+
+            if (error != null)
+            {
+                PlayniteApi.Dialogs.ShowErrorMessage(error, "LANCommander: " + v.Title);
+                return;
+            }
+
+            // remember the real exe location, and point the launch option at it
+            try { LcVariants.Save(VariantsPath, map); }
+            catch (Exception e) { logger.Warn(e, "LANCommander: could not save variants.json"); }
+
+            var fresh = LcVariants.BuildAction(cfg, v);
+            Action<GameAction> apply = act =>
+            {
+                act.Path = fresh.Path;
+                act.WorkingDir = fresh.WorkingDir;
+                act.Arguments = fresh.Arguments;
+            };
+
+            var stored = game.GameActions == null ? null :
+                game.GameActions.FirstOrDefault(x => string.Equals(x.Name, v.Title, StringComparison.OrdinalIgnoreCase));
+            if (stored != null)
+            {
+                apply(stored);
+                PlayniteApi.Database.Games.Update(game);
+            }
+            if (source != null && !ReferenceEquals(source, stored))
+                apply(source);
+        }
+
         // ---------- play sessions ----------
 
         public override void OnGameStarting(OnGameStartingEventArgs args)
@@ -325,11 +558,36 @@ namespace LanCommanderDirect
             if (game == null || game.PluginId != Id) return;
 
             var cfg = LoadConfig();
-            if (cfg == null || !cfg.TrackPlayTime) return;
+            if (cfg == null) return;
+
+            // is this one of the variant launch options (for example "Portal 2 (VR)")?
+            LcVariant variant = null;
+            try
+            {
+                var map = LcVariants.Load(VariantsPath);
+                variant = LcVariants.Match(map, game, args.SourceAction);
+                if (variant != null)
+                    PrepareVariant(cfg, game, variant, args.SourceAction, map);
+            }
+            catch (Exception e)
+            {
+                logger.Error(e, "LANCommander: could not prepare the variant for " + game.Name);
+            }
+
+            lock (activeLock)
+            {
+                if (variant != null) activeVariants[game.Id] = variant;
+                else activeVariants.Remove(game.Id);
+            }
+
+            if (!cfg.TrackPlayTime) return;
+
+            // a variant reports its session to its own entry on the server
+            var serverId = variant != null ? variant.VariantId : game.GameId;
 
             PlayniteApi.Dialogs.ActivateGlobalProgress(p =>
             {
-                try { BeforePlay(cfg, game, p.CancelToken); }
+                try { BeforePlay(cfg, game, serverId, p.CancelToken); }
                 catch (Exception e) { ReportSyncProblem(game, "before playing", e); }
             }, new GlobalProgressOptions("Starting LANCommander play session for " + game.Name + "...", false) { IsIndeterminate = true });
         }
@@ -339,13 +597,21 @@ namespace LanCommanderDirect
             var game = args.Game;
             if (game == null || game.PluginId != Id) return;
 
+            LcVariant variant;
+            lock (activeLock)
+            {
+                activeVariants.TryGetValue(game.Id, out variant);
+                activeVariants.Remove(game.Id);
+            }
+
             var cfg = LoadConfig();
             if (cfg == null || !cfg.TrackPlayTime) return;
 
+            var serverId = variant != null ? variant.VariantId : game.GameId;
             var elapsedSeconds = (long)args.ElapsedSeconds;
             PlayniteApi.Dialogs.ActivateGlobalProgress(p =>
             {
-                try { AfterPlay(cfg, game, elapsedSeconds, p.CancelToken); }
+                try { AfterPlay(cfg, game, serverId, elapsedSeconds, p.CancelToken); }
                 catch (Exception e) { ReportSyncProblem(game, "after playing", e); }
             }, new GlobalProgressOptions("Saving LANCommander play session for " + game.Name + "...", false) { IsIndeterminate = true });
         }
@@ -359,9 +625,9 @@ namespace LanCommanderDirect
                 NotificationType.Error));
         }
 
-        void BeforePlay(LcConfig cfg, Game game, CancellationToken ct)
+        void BeforePlay(LcConfig cfg, Game game, string serverGameId, CancellationToken ct)
         {
-            var id = Guid.Parse(game.GameId);
+            var id = Guid.Parse(serverGameId);
 
             using (var client = new LcClient(cfg))
             {
@@ -378,9 +644,9 @@ namespace LanCommanderDirect
             }
         }
 
-        void AfterPlay(LcConfig cfg, Game game, long elapsedSeconds, CancellationToken ct)
+        void AfterPlay(LcConfig cfg, Game game, string serverGameId, long elapsedSeconds, CancellationToken ct)
         {
-            var id = Guid.Parse(game.GameId);
+            var id = Guid.Parse(serverGameId);
 
             using (var client = new LcClient(cfg))
             {
