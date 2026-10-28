@@ -164,9 +164,10 @@ namespace LanCommanderDirect
             {
                 var games = await client.GetGamesAsync(ct).ConfigureAwait(false);
 
+                // the list only has light records; the detail call adds media, developers, genres, tags...
+                var loaded = new List<LcGame>();
                 foreach (var item in games)
                 {
-                    // the list only has light records; the detail call adds media, developers, genres...
                     var g = item;
                     try
                     {
@@ -177,8 +178,17 @@ namespace LanCommanderDirect
                     {
                         logger.Warn(e, "Could not load LANCommander details for " + item.Id);
                     }
+                    loaded.Add(g);
+                }
 
-                    var variantOf = LcVariants.BaseTitle(g);
+                // every title on the server, so "Portal 2 (VR)" can be recognised as a variant of "Portal 2"
+                var allTitles = loaded.Where(x => !string.IsNullOrWhiteSpace(x.Title)).Select(x => x.Title.Trim()).ToList();
+
+                foreach (var g in loaded)
+                {
+                    var variantOf = LcVariants.BaseTitle(g, allTitles);
+                    if (variantOf != null && string.Equals(variantOf, (g.Title ?? "").Trim(), StringComparison.OrdinalIgnoreCase))
+                        variantOf = null;   // a game can't be a variant of itself
                     if (variantOf != null)
                     {
                         variantGames.Add(Tuple.Create(g, variantOf));
@@ -395,12 +405,27 @@ namespace LanCommanderDirect
                 if (map.Count == 0) return;
 
                 var cfg = ConfigForPaths();
+
+                // Playnite never deletes a game that stops showing up in an import, so a variant that was imported
+                // as its own game earlier (before it was recognised as a variant) has to be removed here
+                var variantIds = new HashSet<string>(
+                    map.Values.SelectMany(l => l).Select(v => v.VariantId), StringComparer.OrdinalIgnoreCase);
+                var stale = PlayniteApi.Database.Games
+                    .Where(g => g.PluginId == Id && !string.IsNullOrEmpty(g.GameId) && variantIds.Contains(g.GameId))
+                    .ToList();
+
                 var games = PlayniteApi.Database.Games
-                    .Where(g => g.PluginId == Id && g.IsInstalled && !string.IsNullOrEmpty(g.GameId))
+                    .Where(g => g.PluginId == Id && g.IsInstalled && !string.IsNullOrEmpty(g.GameId) && !variantIds.Contains(g.GameId))
                     .ToList();
 
                 PlayniteApi.MainView.UIDispatcher.Invoke(() =>
                 {
+                    if (stale.Count > 0)
+                    {
+                        logger.Info("LANCommander: removing " + stale.Count + " standalone entries that are variants of another game");
+                        PlayniteApi.Database.Games.Remove(stale);
+                    }
+
                     foreach (var game in games)
                     {
                         List<LcVariant> list;

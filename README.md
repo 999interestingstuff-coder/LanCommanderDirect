@@ -74,3 +74,19 @@ doesn't fill up the system drive's temp folder, and it is deleted afterwards.
 The install progress notification is now replaced by removing the previous one and adding a new one, on Playnite's UI
 thread, with the downloaded and total size. Progress is also written to extensions.log every 10%, so it can be checked
 there if a notification doesn't refresh.
+
+## Game variants (e.g. a VR build)
+
+Add the variant to LANCommander as its own game, with its own archive, for example `Portal 2` and `Portal 2 (VR)`.
+The plugin does not import the variant as a separate game. Instead it appears as an extra launch option of the base game in Playnite.
+The first time you launch it, it is downloaded to its own folder.
+
+A server game counts as a variant when either:
+
+- it has the tag `variant-of:Portal 2` (the title of the base game), or
+- its title is `Base Title (Something)` and a game called `Base Title` exists. Suffixes that are just a year, like `(2019)`, are ignored.
+
+Add the tag `not-a-variant` to a game to stop it from ever being treated as a variant.
+
+Variants that were imported as standalone games earlier are removed from Playnite automatically on the next library update.
+Their play time is not carried over to the base game.

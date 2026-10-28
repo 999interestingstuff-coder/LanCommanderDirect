@@ -42,21 +42,47 @@ namespace LanCommanderDirect
 
         // ---------- detection ----------
 
-        /// <summary>Returns the base game's title if this server game is tagged as a variant, otherwise null.</summary>
-        public static string BaseTitle(LcGame g)
+        /// <summary>Tag that stops a game from ever being treated as a variant (for "Foo (Bar)" titles that are real games).</summary>
+        public const string OptOutTag = "not-a-variant";
+
+        static readonly Regex SuffixTitle = new Regex(@"^(?<base>.+?)\s*[\(\[](?<suffix>[^\)\]]+)[\)\]]\s*$", RegexOptions.Compiled);
+
+        /// <summary>
+        /// Returns the title of the base game if this server game is a variant, otherwise null.
+        /// Two ways to mark one: the tag "variant-of:Portal 2", or simply naming it "Portal 2 (VR)" while a game
+        /// called "Portal 2" exists. <paramref name="allTitles"/> is every game title on the server.
+        /// </summary>
+        public static string BaseTitle(LcGame g, ICollection<string> allTitles)
         {
-            if (g == null || g.Tags == null) return null;
-            foreach (var t in g.Tags)
+            if (g == null) return null;
+
+            var tagNames = (g.Tags ?? new List<LcNamed>())
+                .Where(t => t != null && !string.IsNullOrWhiteSpace(t.Name))
+                .Select(t => t.Name.Trim())
+                .ToList();
+
+            if (tagNames.Any(n => string.Equals(n, OptOutTag, StringComparison.OrdinalIgnoreCase)))
+                return null;
+
+            foreach (var name in tagNames)
             {
-                if (t == null || string.IsNullOrWhiteSpace(t.Name)) continue;
-                var name = t.Name.Trim();
                 if (name.StartsWith(TagPrefix, StringComparison.OrdinalIgnoreCase))
                 {
                     var title = name.Substring(TagPrefix.Length).Trim();
                     if (title.Length > 0) return title;
                 }
             }
-            return null;
+
+            // no tag: "Base Game (Something)" counts as a variant when "Base Game" exists as its own game
+            if (allTitles == null || string.IsNullOrWhiteSpace(g.Title)) return null;
+            var m = SuffixTitle.Match(g.Title.Trim());
+            if (!m.Success) return null;
+
+            var suffix = m.Groups["suffix"].Value.Trim();
+            if (Regex.IsMatch(suffix, @"^\d{4}$")) return null;   // "Resident Evil (2019)" is a different game, not a variant
+
+            var baseTitle = m.Groups["base"].Value.Trim();
+            return allTitles.FirstOrDefault(t => string.Equals(t, baseTitle, StringComparison.OrdinalIgnoreCase));
         }
 
         // ---------- storage ----------
