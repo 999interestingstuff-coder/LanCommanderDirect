@@ -102,11 +102,11 @@ namespace LanCommanderDirect
         }
 
         /// <summary>Shows a popup for a game. detail is only used for the failed kinds (the error text).</summary>
-        public static void Show(IPlayniteAPI api, Game game, LcToastKind kind, string detail, LcConfig cfg)
+        public static void Show(IPlayniteAPI api, Game game, LcToastKind kind, string detail, LcConfig cfg, string displayName = null)
         {
             try
             {
-                api.MainView.UIDispatcher.BeginInvoke(new Action(() => ShowCore(api, game, kind, detail, cfg)));
+                api.MainView.UIDispatcher.BeginInvoke(new Action(() => ShowCore(api, game, kind, detail, cfg, displayName)));
             }
             catch (Exception e)
             {
@@ -162,7 +162,7 @@ namespace LanCommanderDirect
             };
         }
 
-        static void ShowCore(IPlayniteAPI api, Game game, LcToastKind kind, string detail, LcConfig cfg)
+        static void ShowCore(IPlayniteAPI api, Game game, LcToastKind kind, string detail, LcConfig cfg, string displayName)
         {
             try
             {
@@ -205,7 +205,8 @@ namespace LanCommanderDirect
                 texts.Children.Add(headerRow);
                 texts.Children.Add(new TextBlock
                 {
-                    Text = game != null && !string.IsNullOrWhiteSpace(game.Name) ? game.Name : "LANCommander",
+                    Text = !string.IsNullOrWhiteSpace(displayName) ? displayName
+                           : (game != null && !string.IsNullOrWhiteSpace(game.Name) ? game.Name : "LANCommander"),
                     FontSize = 15,
                     FontWeight = FontWeights.SemiBold,
                     Foreground = Brushes.White,

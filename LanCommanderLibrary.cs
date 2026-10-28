@@ -1121,140 +1121,109 @@ namespace LanCommanderDirect
         readonly object activeLock = new object();
 
         /// <summary>
-        /// Called while Playnite is starting a variant's launch option. If the variant isn't on disk yet it is
-        /// downloaded and extracted first. This runs before Playnite starts the exe, behind a progress dialog.
+        /// Installs a variant in the background (same as a normal install: progress in the notification panel, and a
+        /// notification and popup when it is done). The launch that triggered it is cancelled; press Play again once it is installed.
         /// </summary>
-        /// <returns>True if the variant was downloaded just now (so Playnite's own start of it can't work).</returns>
-        bool PrepareVariant(LcConfig cfg, Game game, LcVariant v, GameAction source, Dictionary<string, List<LcVariant>> map)
+        void StartVariantInstall(LcConfig cfg, Game game, LcVariant v)
         {
-            if (LcVariants.IsInstalled(cfg, v)) return false;
+            var vid = Guid.Parse(v.VariantId);
+            var noteId = "lc-install-" + vid;
 
-            string error = null;
-
-            PlayniteApi.Dialogs.ActivateGlobalProgress(a =>
+            if (!LcJobs.TryBegin(vid))
             {
+                PlayniteApi.Notifications.Remove(noteId + "-busy");
+                PlayniteApi.Notifications.Add(new NotificationMessage(noteId + "-busy",
+                    v.Title + " is already being installed.", NotificationType.Info));
+                return;
+            }
+
+            var cts = new CancellationTokenSource();
+            var progress = LcJobs.MakeProgress(PlayniteApi, noteId, cts.Token);
+            var title = v.Title;
+
+            PlayniteApi.Notifications.Remove(noteId);
+            PlayniteApi.Notifications.Add(new NotificationMessage(noteId,
+                "Installing " + title + " (it was not installed yet)...", NotificationType.Info));
+
+            Task.Run(() =>
+            {
+                LcGame info = null;
+                string dir = null;
+                Exception error = null;
+                bool cancelled = false;
+
                 try
                 {
-                    a.ProgressMaxValue = 100;
-
-                    var p = new LcProgress(a.CancelToken, pr =>
-                    {
-                        a.Text = (pr.Text ?? "").TrimEnd('.') + " " + Math.Round(pr.CurrentProgressValue) + "%" +
-                                 (pr.BytesTotal > 0 ? " (" + LcFormat.Bytes(pr.BytesDone) + " of " + LcFormat.Bytes(pr.BytesTotal) + ")" : "");
-                        a.CurrentProgressValue = pr.CurrentProgressValue;
-                    });
-
-                    LcGame info;
-                    var dir = LcVariantInstaller.Install(cfg, v, p, out info);
+                    dir = LcVariantInstaller.Install(cfg, v, progress, out info,
+                        () => LcJobs.ShowQueued(PlayniteApi, noteId, title));
 
                     if (!LcVariants.Resolve(dir, info, v))
                         throw new InvalidOperationException("The download finished, but no .exe was found in " + dir + ".");
                 }
-                catch (OperationCanceledException) { error = "The install of " + v.Title + " was cancelled."; }
-                catch (Exception e)
+                catch (OperationCanceledException) { cancelled = true; }
+                catch (Exception e) { error = e; }
+                finally { LcJobs.End(vid); }
+
+                PlayniteApi.MainView.UIDispatcher.Invoke(() =>
                 {
-                    logger.Error(e, "LANCommander: variant install failed for " + v.Title);
-                    error = e.Message;
-                }
-            }, new GlobalProgressOptions("Installing " + v.Title + " (first launch)...", true) { IsIndeterminate = false });
-
-            if (error != null)
-            {
-                PlayniteApi.Dialogs.ShowErrorMessage(error, "LANCommander: " + v.Title);
-                return false;
-            }
-
-            // remember the real exe location, and point the launch option at it
-            try { LcVariants.Save(VariantsPath, map); }
-            catch (Exception e) { logger.Warn(e, "LANCommander: could not save variants.json"); }
-
-            var fresh = LcVariants.BuildAction(cfg, v);
-            Action<GameAction> apply = act =>
-            {
-                act.Path = fresh.Path;
-                act.WorkingDir = fresh.WorkingDir;
-                act.Arguments = fresh.Arguments;
-            };
-
-            var stored = game.GameActions == null ? null :
-                game.GameActions.FirstOrDefault(x => string.Equals(x.Name, v.Title, StringComparison.OrdinalIgnoreCase));
-            if (stored != null)
-            {
-                apply(stored);
-                PlayniteApi.Database.Games.Update(game);
-            }
-            if (source != null && !ReferenceEquals(source, stored))
-                apply(source);
-
-            return true;
-        }
-
-        /// <summary>
-        /// Playnite has already fixed the path of the launch option it is starting (the one from before the download),
-        /// so right after a first-time install the variant is started here instead, and its session is tracked here.
-        /// </summary>
-        void LaunchVariantNow(LcConfig cfg, Game game, LcVariant v)
-        {
-            var action = LcVariants.BuildAction(cfg, v);
-            if (!File.Exists(action.Path))
-            {
-                PlayniteApi.Dialogs.ShowErrorMessage("The exe was not found after the install: " + action.Path, "LANCommander: " + v.Title);
-                return;
-            }
-
-            var psi = new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = action.Path,
-                Arguments = action.Arguments ?? "",
-                WorkingDirectory = !string.IsNullOrEmpty(action.WorkingDir) && Directory.Exists(action.WorkingDir)
-                    ? action.WorkingDir : Path.GetDirectoryName(action.Path),
-                UseShellExecute = false
-            };
-
-            Task.Run(() =>
-            {
-                if (cfg.TrackPlayTime)
-                {
-                    try { BeforePlay(cfg, game, v.VariantId, CancellationToken.None); }
-                    catch (Exception e) { logger.Warn(e, "LANCommander: could not start the play session for " + v.Title); }
-                }
-
-                var timer = System.Diagnostics.Stopwatch.StartNew();
-                try
-                {
-                    logger.Info("LANCommander: starting " + v.Title + " right after its install: " + psi.FileName + " " + psi.Arguments);
-                    using (var proc = System.Diagnostics.Process.Start(psi))
+                    if (cancelled)
                     {
-                        if (proc != null) proc.WaitForExit();
+                        PlayniteApi.Notifications.Remove(noteId);
+                        return;
                     }
-                }
-                catch (Exception e)
-                {
-                    logger.Error(e, "LANCommander: could not start " + v.Title);
-                    PlayniteApi.MainView.UIDispatcher.BeginInvoke(new Action(() =>
-                        PlayniteApi.Dialogs.ShowErrorMessage("Could not start " + v.Title + ": " + e.Message, "LANCommander")));
-                    return;
-                }
-                timer.Stop();
 
-                var seconds = (long)timer.Elapsed.TotalSeconds;
-                try
-                {
-                    PlayniteApi.MainView.UIDispatcher.Invoke(() =>
+                    if (error != null)
                     {
-                        game.Playtime += (ulong)seconds;
-                        game.PlayCount += 1;
-                        game.LastActivity = DateTime.Now;
-                        PlayniteApi.Database.Games.Update(game);
-                    });
-                }
-                catch (Exception e) { logger.Warn(e, "LANCommander: could not save the play time of " + v.Title); }
+                        logger.Error(error, "LANCommander: variant install failed for " + title);
+                        PlayniteApi.Notifications.Remove(noteId);
+                        PlayniteApi.Notifications.Add(new NotificationMessage(noteId,
+                            title + ": install failed: " + error.Message, NotificationType.Error));
+                        if (cfg.PopupNotifications)
+                            LcToast.Show(PlayniteApi, game, LcToastKind.InstallFailed, error.Message, cfg, title);
+                        else
+                            PlayniteApi.Dialogs.ShowErrorMessage(error.Message, "LANCommander: " + title);
+                        return;
+                    }
 
-                if (cfg.TrackPlayTime)
-                {
-                    try { AfterPlay(cfg, game, v.VariantId, seconds, CancellationToken.None); }
-                    catch (Exception e) { logger.Warn(e, "LANCommander: could not end the play session for " + v.Title); }
-                }
+                    try
+                    {
+                        // remember the real exe location (re-read the file: a library update may have rewritten it meanwhile)
+                        var fresh = LcVariants.Load(VariantsPath);
+                        List<LcVariant> list;
+                        var stored = fresh.TryGetValue(game.GameId, out list)
+                            ? list.FirstOrDefault(x => x.VariantId == v.VariantId) : null;
+                        if (stored != null)
+                        {
+                            stored.ExeRel = v.ExeRel;
+                            stored.Arguments = v.Arguments;
+                            stored.WorkingDirRel = v.WorkingDirRel;
+                            stored.Resolved = true;
+                            LcVariants.Save(VariantsPath, fresh);
+                        }
+
+                        // point the launch option at the real exe
+                        var built = LcVariants.BuildAction(cfg, v);
+                        var action = game.GameActions == null ? null :
+                            game.GameActions.FirstOrDefault(x => string.Equals(x.Name, v.Title, StringComparison.OrdinalIgnoreCase));
+                        if (action != null)
+                        {
+                            action.Path = built.Path;
+                            action.WorkingDir = built.WorkingDir;
+                            action.Arguments = built.Arguments;
+                            PlayniteApi.Database.Games.Update(game);
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        logger.Warn(e, "LANCommander: could not save the install of " + title);
+                    }
+
+                    PlayniteApi.Notifications.Remove(noteId);
+                    PlayniteApi.Notifications.Add(new NotificationMessage(noteId,
+                        title + " is installed. Press Play to start it.", NotificationType.Info));
+                    if (cfg.PopupNotifications)
+                        LcToast.Show(PlayniteApi, game, LcToastKind.Installed, null, cfg, title);
+                });
             });
         }
 
@@ -1278,11 +1247,11 @@ namespace LanCommanderDirect
                             (args.SourceAction != null ? args.SourceAction.Name : "(default)") + "', variant: " +
                             (variant != null ? variant.Title : "none"));
 
-                if (variant != null && PrepareVariant(cfg, game, variant, args.SourceAction, map))
+                if (variant != null && !LcVariants.IsInstalled(cfg, variant))
                 {
-                    // just downloaded: Playnite's own start would use the old path, so cancel it and start the variant here
+                    // not on disk yet: install it in the background and don't start anything now
                     args.CancelStartup = true;
-                    LaunchVariantNow(cfg, game, variant);
+                    StartVariantInstall(cfg, game, variant);
                     return;
                 }
             }

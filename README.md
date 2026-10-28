@@ -153,7 +153,7 @@ report progress still work, just without a percentage.)
 
 Add the variant to LANCommander as its own game, with its own archive, for example `Portal 2` and `Portal 2 (VR)`.
 The plugin does not import the variant as a separate game. It appears as an extra launch option of the base game in Playnite,
-and is downloaded to its own folder the first time you launch it. Play sessions of a variant are reported to its own server entry.
+and is downloaded to its own folder in the background the first time you pick it (progress in the notification panel, and a notification and popup when it is done). Press Play again once it is installed. Play sessions of a variant are reported to its own server entry.
 
 A server game counts as a variant when either:
 

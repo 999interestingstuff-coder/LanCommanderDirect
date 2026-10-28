@@ -390,13 +390,13 @@ namespace LanCommanderDirect
     {
         static readonly ILogger logger = LogManager.GetLogger();
 
-        public static string Install(LcConfig cfg, LcVariant v, LcProgress p, out LcGame info)
+        public static string Install(LcConfig cfg, LcVariant v, LcProgress p, out LcGame info, Action onWaiting = null)
         {
             var id = Guid.Parse(v.VariantId);
             var ct = p.CancelToken;
 
             // one download at a time, same as the normal installs and updates
-            LcJobs.AcquireSlot(ct, null);
+            LcJobs.AcquireSlot(ct, onWaiting);
             try
             {
                 using (var client = new LcClient(cfg))
