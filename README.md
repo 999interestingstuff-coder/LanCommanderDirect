@@ -148,3 +148,20 @@ zip files included, and the progress notification shows its percentage. Without 
 built-in extractor, and anything that isn't a zip fails with a message asking for 7-Zip. (Very old 7-Zip versions that don't
 report progress still work, just without a percentage.)
 
+
+## Game variants (e.g. a VR build) (0.5.3)
+
+Add the variant to LANCommander as its own game, with its own archive, for example `Portal 2` and `Portal 2 (VR)`.
+The plugin does not import the variant as a separate game. It appears as an extra launch option of the base game in Playnite,
+and is downloaded to its own folder the first time you launch it. Play sessions of a variant are reported to its own server entry.
+
+A server game counts as a variant when either:
+
+- it has the tag `variant-of:Portal 2` (the title of the base game), or
+- its title is `Base Title (Something)` and a game called `Base Title` exists. Suffixes that are just a year, like `(2019)`, are ignored.
+
+Add the tag `not-a-variant` to a game to stop it from ever being treated as a variant.
+
+Variants that were imported as standalone games earlier are removed from Playnite on the next library update
+(their play time is not carried over). Uninstalling the base game also deletes the variant folders.
+Archive updates for variants are not handled yet: a variant is installed once, from the newest archive at that time.
